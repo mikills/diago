@@ -5,6 +5,7 @@ Go diagnostics from one command.
 ```sh
 go install github.com/mikills/diago/cmd/diago@latest
 diago -target ./...
+diago --version
 ```
 
 `diago` runs built-in Go checks plus native source analysis. It can also collect pprof data from benchmarks.

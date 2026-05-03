@@ -8,9 +8,18 @@ import (
 	"github.com/mikills/diago/diago"
 )
 
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "--version", "-version", "version":
+			printVersion()
+			return
 		case "compare":
 			runCompare(os.Args[2:])
 			return
@@ -29,6 +38,10 @@ func main() {
 		return
 	}
 	runAudit(args)
+}
+
+func printVersion() {
+	fmt.Printf("diago %s\ncommit: %s\nbuilt: %s\n", version, commit, date)
 }
 
 func stripPerfFlag(args []string) ([]string, bool) {

@@ -35,6 +35,9 @@ jobs:
           mkdir -p dist
 
           version="${GITHUB_REF_NAME}"
+          commit="${GITHUB_SHA}"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X main.version=${version} -X main.commit=${commit} -X main.date=${build_date}"
           platforms=(
             "darwin amd64"
             "darwin arm64"
@@ -54,7 +57,7 @@ jobs:
 
             mkdir -p "dist/${name}"
             GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
-              go build -trimpath -ldflags="-s -w" -o "dist/${name}/${binary}" ./cmd/diago
+              go build -trimpath -ldflags="${ldflags}" -o "dist/${name}/${binary}" ./cmd/diago
 
             cp README.md LICENSE "dist/${name}/" 2>/dev/null || true
 
