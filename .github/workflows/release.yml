@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          version="${GITHUB_REF_NAME}"
+          platforms=(
+            "darwin amd64"
+            "darwin arm64"
+            "linux amd64"
+            "linux arm64"
+            "windows amd64"
+            "windows arm64"
+          )
+
+          for platform in "${platforms[@]}"; do
+            read -r goos goarch <<<"${platform}"
+            name="diago_${version}_${goos}_${goarch}"
+            binary="diago"
+            if [ "${goos}" = "windows" ]; then
+              binary="diago.exe"
+            fi
+
+            mkdir -p "dist/${name}"
+            GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
+              go build -trimpath -ldflags="-s -w" -o "dist/${name}/${binary}" ./cmd/diago
+
+            cp README.md LICENSE "dist/${name}/" 2>/dev/null || true
+
+            if [ "${goos}" = "windows" ]; then
+              (cd dist && zip -qr "${name}.zip" "${name}")
+            else
+              tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+            fi
+            rm -rf "dist/${name}"
+          done
+
+          (cd dist && sha256sum * > checksums.txt)
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --title "${GITHUB_REF_NAME}"
