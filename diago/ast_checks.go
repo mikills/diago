@@ -4,27 +4,38 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"reflect"
 	"strconv"
 	"strings"
 )
 
 type packageSignals struct {
-	strings  map[string][]astLocation
-	numbers  map[string][]astLocation
-	exported int
-	tests    int
+	strings      map[string][]astLocation
+	numbers      map[string][]astLocation
+	declarations map[string]deadDeclaration
+	references   map[string]int
+	exported     int
+	tests        int
+}
+
+type deadDeclaration struct {
+	kind string
+	loc  astLocation
 }
 
 func newPackageSignals(pkg goListPackage) *packageSignals {
 	return &packageSignals{
-		strings: map[string][]astLocation{},
-		numbers: map[string][]astLocation{},
-		tests:   len(pkg.TestGoFiles),
+		strings:      map[string][]astLocation{},
+		numbers:      map[string][]astLocation{},
+		declarations: map[string]deadDeclaration{},
+		references:   map[string]int{},
+		tests:        len(pkg.TestGoFiles),
 	}
 }
 
 func analyzeExtraFile(findings *[]ASTFinding, signals *packageSignals, ctx astContext, file *ast.File) {
 	collectExportedSurface(signals, file)
+	collectDeadCodeSignals(signals, ctx, file)
 	collectLiteralSignals(signals, ctx, file)
 	findExtraFunctionSignals(findings, ctx, file)
 }
@@ -47,6 +58,7 @@ func appendPackageSignalFindings(findings *[]ASTFinding, pkg goListPackage, sign
 			*findings = append(*findings, astFinding("magic-number", "low", locs[0], "", msg))
 		}
 	}
+	appendDeadCodeFindings(findings, signals)
 }
 
 func collectExportedSurface(signals *packageSignals, file *ast.File) {
@@ -67,6 +79,106 @@ func collectExportedSurface(signals *packageSignals, file *ast.File) {
 			}
 		}
 	}
+}
+
+func collectDeadCodeSignals(signals *packageSignals, ctx astContext, file *ast.File) {
+	if ctx.generated {
+		return
+	}
+	if !ctx.isTest {
+		collectPackageDeclarations(signals, ctx, file)
+	}
+	collectPackageReferences(signals, file)
+}
+
+func collectPackageDeclarations(signals *packageSignals, ctx astContext, file *ast.File) {
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if shouldTrackDeadFunc(d) {
+				signals.declarations[d.Name.Name] = deadDeclaration{kind: "function", loc: nodeLocation(ctx, d)}
+			}
+		case *ast.GenDecl:
+			collectGenDeclDeclarations(signals, ctx, d)
+		}
+	}
+}
+
+func collectGenDeclDeclarations(signals *packageSignals, ctx astContext, decl *ast.GenDecl) {
+	for _, spec := range decl.Specs {
+		switch s := spec.(type) {
+		case *ast.TypeSpec:
+			if shouldTrackDeadName(s.Name.Name) {
+				signals.declarations[s.Name.Name] = deadDeclaration{kind: "type", loc: nodeLocation(ctx, s)}
+			}
+		case *ast.ValueSpec:
+			for _, name := range s.Names {
+				if shouldTrackDeadName(name.Name) {
+					signals.declarations[name.Name] = deadDeclaration{kind: strings.ToLower(decl.Tok.String()), loc: nodeLocation(ctx, name)}
+				}
+			}
+		}
+	}
+}
+
+func collectPackageReferences(signals *packageSignals, file *ast.File) {
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			inspectReferenceNode(signals, d.Recv)
+			inspectReferenceNode(signals, d.Type)
+			inspectReferenceNode(signals, d.Body)
+		case *ast.GenDecl:
+			collectGenDeclReferences(signals, d)
+		}
+	}
+}
+
+func collectGenDeclReferences(signals *packageSignals, decl *ast.GenDecl) {
+	for _, spec := range decl.Specs {
+		switch s := spec.(type) {
+		case *ast.TypeSpec:
+			inspectReferenceNode(signals, s.Type)
+		case *ast.ValueSpec:
+			inspectReferenceNode(signals, s.Type)
+			for _, value := range s.Values {
+				inspectReferenceNode(signals, value)
+			}
+		}
+	}
+}
+
+func inspectReferenceNode(signals *packageSignals, n ast.Node) {
+	if n == nil || reflect.ValueOf(n).IsNil() {
+		return
+	}
+	ast.Inspect(n, func(child ast.Node) bool {
+		ident, ok := child.(*ast.Ident)
+		if ok {
+			signals.references[ident.Name]++
+		}
+		return true
+	})
+}
+
+func appendDeadCodeFindings(findings *[]ASTFinding, signals *packageSignals) {
+	for name, decl := range signals.declarations {
+		if signals.references[name] == 0 {
+			msg := fmt.Sprintf("unexported %s %s appears unused within package", decl.kind, name)
+			*findings = append(*findings, astFinding("dead-code", "low", decl.loc, name, msg))
+		}
+	}
+}
+
+func shouldTrackDeadFunc(fn *ast.FuncDecl) bool {
+	if fn.Recv != nil {
+		return false
+	}
+	return shouldTrackDeadName(fn.Name.Name) && fn.Name.Name != "init" && fn.Name.Name != "main"
+}
+
+func shouldTrackDeadName(name string) bool {
+	return name != "" && !ast.IsExported(name) && name != "_"
 }
 
 func collectLiteralSignals(signals *packageSignals, ctx astContext, file *ast.File) {
@@ -497,12 +609,4 @@ func looksLikeFormatString(s string) bool { return strings.Contains(s, "%") }
 func isAllowedNumberLiteral(s string) bool {
 	s = strings.TrimPrefix(strings.ToLower(s), "0x")
 	return s == "0" || s == "1" || s == "2" || s == "5" || s == "10" || s == "0644"
-}
-
-func isLargeNumberLiteral(s string) bool {
-	clean := strings.Trim(strings.ToLower(s), "_")
-	if v, err := strconv.ParseFloat(clean, 64); err == nil {
-		return v > 1000 || v < -1000
-	}
-	return false
 }

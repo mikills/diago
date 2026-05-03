@@ -282,6 +282,8 @@ func WriteCompareReport(path string, cr *CompareReport, format OutputFormat) err
 }
 
 func diffFindings(before, after []Finding) (improved, regressed []ChangedFinding) {
+	improved = make([]ChangedFinding, 0, len(before))
+	regressed = make([]ChangedFinding, 0, len(after))
 	beforeIndex := make(map[string]int, len(before))
 	for i := range before {
 		beforeIndex[before[i].Function] = i
@@ -353,6 +355,8 @@ func diffFindings(before, after []Finding) (improved, regressed []ChangedFinding
 }
 
 func diffEscapes(before, after []EscapeFinding) (added, removed []EscapeFinding) {
+	added = make([]EscapeFinding, 0, len(after))
+	removed = make([]EscapeFinding, 0, len(before))
 	type escKey struct {
 		File string
 		Line int

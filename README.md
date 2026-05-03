@@ -27,7 +27,7 @@ Audit runs:
 - `go vet`
 - coverage summary
 - dependency count
-- native AST checks for complexity, error handling, resource handling, context use, generated-file-aware size checks, and maintainability smells
+- native AST checks for complexity, error handling, resource handling, context use, dead-code hints, generated-file-aware size checks, and maintainability smells
 
 Disable expensive/noisy parts:
 

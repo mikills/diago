@@ -13,11 +13,7 @@ import (
 
 const installPackage = "github.com/mikills/diago/cmd/diago"
 
-var (
-	version = "dev"
-	commit  = "unknown"
-	date    = "unknown"
-)
+var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -49,30 +45,19 @@ func main() {
 }
 
 func printVersion() {
-	v, c, d := versionInfo()
-	fmt.Printf("diago %s\ncommit: %s\nbuilt: %s\n", v, c, d)
+	fmt.Printf("diago %s\n", versionInfo())
 }
 
-func versionInfo() (string, string, string) {
-	v, c, d := version, commit, date
+func versionInfo() string {
+	if version != "dev" {
+		return version
+	}
 	if info, ok := debug.ReadBuildInfo(); ok {
-		if v == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
-			v = info.Main.Version
-		}
-		for _, setting := range info.Settings {
-			switch setting.Key {
-			case "vcs.revision":
-				if c == "unknown" {
-					c = setting.Value
-				}
-			case "vcs.time":
-				if d == "unknown" {
-					d = setting.Value
-				}
-			}
+		if info.Main.Version != "" && info.Main.Version != "(devel)" {
+			return info.Main.Version
 		}
 	}
-	return v, c, d
+	return version
 }
 
 func runUpgrade(args []string) {
@@ -152,7 +137,22 @@ func runProfile(args []string) {
 	fmt.Printf("mutex hotspots: %d\n", len(report.MutexFindings))
 	fmt.Printf("block hotspots: %d\n", len(report.BlockFindings))
 	fmt.Printf("heap escapes:   %d\n", len(report.EscapeFindings))
-	fmt.Printf("findings written to %s\n", cfg.OutputFile)
+	printPerfSummary(report)
+	fmt.Printf("\nfull report: %s\n", cfg.OutputFile)
+}
+
+func printPerfSummary(report *diago.Report) {
+	if len(report.Summary) == 0 {
+		return
+	}
+	fmt.Println("\ntop findings:")
+	for _, item := range report.Summary {
+		fmt.Printf("  - [%s] %.2f%% %s", item.ProfileType, item.CumPct, item.Function)
+		if item.File != "" {
+			fmt.Printf(" at %s:%d", item.File, item.Line)
+		}
+		fmt.Println()
+	}
 }
 
 func runCompare(args []string) {
@@ -268,6 +268,7 @@ func printASTSummary(s diago.AuditSummary) {
 		"naked-return",
 		"too-many-returns",
 		"deep-anonymous-function",
+		"dead-code",
 		"large-file",
 		"large-package",
 	}, s.ASTByRule)

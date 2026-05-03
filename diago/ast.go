@@ -40,10 +40,11 @@ type packageStats struct {
 }
 
 type astContext struct {
-	pkg    goListPackage
-	path   string
-	isTest bool
-	fset   *token.FileSet
+	pkg       goListPackage
+	path      string
+	isTest    bool
+	generated bool
+	fset      *token.FileSet
 }
 
 type astLocation struct {
@@ -88,13 +89,14 @@ func analyzePackageFile(findings *[]ASTFinding, pkg goListPackage, file string, 
 		return
 	}
 
+	generated := isGeneratedFile(path, parsed)
 	lineCount := fileLineCount(path)
 	stats.files++
 	stats.lines += lineCount
-	appendLargeFileFinding(findings, pkg.ImportPath, path, lineCount, isGeneratedFile(path, parsed))
+	appendLargeFileFinding(findings, pkg.ImportPath, path, lineCount, generated)
 	findCommentDebt(findings, pkg.ImportPath, path, fset, parsed)
 
-	ctx := astContext{pkg: pkg, path: path, isTest: strings.HasSuffix(file, "_test.go"), fset: fset}
+	ctx := astContext{pkg: pkg, path: path, isTest: strings.HasSuffix(file, "_test.go"), generated: generated, fset: fset}
 	analyzeExtraFile(findings, signals, ctx, parsed)
 	for _, decl := range parsed.Decls {
 		fn, ok := decl.(*ast.FuncDecl)

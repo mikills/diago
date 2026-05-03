@@ -35,9 +35,7 @@ jobs:
           mkdir -p dist
 
           version="${GITHUB_REF_NAME}"
-          commit="${GITHUB_SHA}"
-          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          ldflags="-s -w -X main.version=${version} -X main.commit=${commit} -X main.date=${build_date}"
+          ldflags="-s -w -X main.version=${version}"
           platforms=(
             "darwin amd64"
             "darwin arm64"
