@@ -6,6 +6,7 @@ Go diagnostics from one command.
 go install github.com/mikills/diago/cmd/diago@latest
 diago -target ./...
 diago --version
+diago upgrade
 ```
 
 `diago` runs built-in Go checks plus native source analysis. It can also collect pprof data from benchmarks.
@@ -77,6 +78,13 @@ Perf:
 -threshold       minimum cumulative percentage (default 1.0)
 -output          report path (default diago_findings.txt)
 -format          text or json (default text)
+```
+
+## Upgrade
+
+```sh
+diago upgrade           # installs latest with go install
+diago upgrade v0.1.0    # installs a specific version
 ```
 
 ## Notes

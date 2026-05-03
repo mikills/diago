@@ -4,9 +4,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime/debug"
+	"strings"
 
 	"github.com/mikills/diago/diago"
 )
+
+const installPackage = "github.com/mikills/diago/cmd/diago"
 
 var (
 	version = "dev"
@@ -29,6 +34,9 @@ func main() {
 		case "perf", "profile":
 			runProfile(os.Args[2:])
 			return
+		case "upgrade":
+			runUpgrade(os.Args[2:])
+			return
 		}
 	}
 
@@ -41,7 +49,63 @@ func main() {
 }
 
 func printVersion() {
-	fmt.Printf("diago %s\ncommit: %s\nbuilt: %s\n", version, commit, date)
+	v, c, d := versionInfo()
+	fmt.Printf("diago %s\ncommit: %s\nbuilt: %s\n", v, c, d)
+}
+
+func versionInfo() (string, string, string) {
+	v, c, d := version, commit, date
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			v = info.Main.Version
+		}
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if c == "unknown" {
+					c = setting.Value
+				}
+			case "vcs.time":
+				if d == "unknown" {
+					d = setting.Value
+				}
+			}
+		}
+	}
+	return v, c, d
+}
+
+func runUpgrade(args []string) {
+	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "print the go install command without running it")
+	fs.Parse(args)
+
+	versionArg := "latest"
+	remaining := fs.Args()
+	if len(remaining) > 1 {
+		fmt.Fprintf(os.Stderr, "usage: diago upgrade [--dry-run] [latest|vX.Y.Z]\n")
+		os.Exit(1)
+	}
+	if len(remaining) == 1 {
+		versionArg = remaining[0]
+	}
+
+	installTarget := installPackage + "@" + versionArg
+	cmdArgs := []string{"install", installTarget}
+	fmt.Printf("go %s\n", strings.Join(cmdArgs, " "))
+	if *dryRun {
+		return
+	}
+
+	cmd := exec.Command("go", cmdArgs...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "upgrade failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("upgrade complete")
+	fmt.Println("note: go install writes to $(go env GOPATH)/bin; make sure that directory is on PATH")
 }
 
 func stripPerfFlag(args []string) ([]string, bool) {
