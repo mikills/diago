@@ -363,6 +363,59 @@ func writeAuditText(path string, report *AuditReport) error {
 	return os.WriteFile(path, buf.Bytes(), 0644)
 }
 
+func AuditRuleOrder() []string {
+	return []string{
+		"cyclomatic-complexity",
+		"function-length",
+		"nesting-depth",
+		"parameter-count",
+		"panic-outside-main",
+		"os-exit-outside-main",
+		"defer-in-loop",
+		"goroutine-in-loop",
+		"comment-debt",
+		"ignored-call-result",
+		"empty-error-branch",
+		"swallowed-error",
+		"recover-outside-defer",
+		"missing-context-param",
+		"background-context",
+		"http-client-without-timeout",
+		"resource-not-closed",
+		"untested-exported-surface",
+		"duplicate-string-literal",
+		"magic-number",
+		"long-switch",
+		"long-if-chain",
+		"large-composite-literal",
+		"naked-return",
+		"too-many-returns",
+		"deep-anonymous-function",
+		"dead-code",
+		"large-file",
+		"large-package",
+	}
+}
+
+func writeCountTable(buf *bytes.Buffer, title string, order []string, counts map[string]int) {
+	if len(counts) == 0 {
+		return
+	}
+	fmt.Fprintf(buf, "%s:\n", title)
+	seen := map[string]bool{}
+	for _, key := range order {
+		if count := counts[key]; count > 0 {
+			fmt.Fprintf(buf, "  %-28s %d\n", key, count)
+			seen[key] = true
+		}
+	}
+	for key, count := range counts {
+		if !seen[key] {
+			fmt.Fprintf(buf, "  %-28s %d\n", key, count)
+		}
+	}
+}
+
 func writeAuditSummaryText(buf *bytes.Buffer, report *AuditReport) {
 	s := report.Summary
 	fmt.Fprintf(buf, "--- summary ---\n")
@@ -375,8 +428,8 @@ func writeAuditSummaryText(buf *bytes.Buffer, report *AuditReport) {
 	}
 	if s.ASTTotal > 0 {
 		fmt.Fprintf(buf, "ast findings: %d\n", s.ASTTotal)
-		fmt.Fprintf(buf, "by severity: %v\n", s.ASTBySeverity)
-		fmt.Fprintf(buf, "by rule: %v\n", s.ASTByRule)
+		writeCountTable(buf, "by severity", []string{"critical", "high", "medium", "low"}, s.ASTBySeverity)
+		writeCountTable(buf, "by rule", AuditRuleOrder(), s.ASTByRule)
 		fmt.Fprintf(buf, "critical/high findings:\n")
 		for _, f := range s.CriticalHigh {
 			fmt.Fprintf(buf, "  %s [%s] %s:%d %s %s\n", f.Rule, f.Severity, f.File, f.Line, f.Symbol, f.Message)

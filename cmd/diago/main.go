@@ -241,37 +241,7 @@ func printASTSummary(s diago.AuditSummary) {
 	}
 	fmt.Printf("\nast findings: %d\n", s.ASTTotal)
 	printCountTable("by severity", []string{"critical", "high", "medium", "low"}, s.ASTBySeverity)
-	printCountTable("by rule", []string{
-		"cyclomatic-complexity",
-		"function-length",
-		"nesting-depth",
-		"parameter-count",
-		"panic-outside-main",
-		"os-exit-outside-main",
-		"defer-in-loop",
-		"goroutine-in-loop",
-		"comment-debt",
-		"ignored-call-result",
-		"empty-error-branch",
-		"swallowed-error",
-		"recover-outside-defer",
-		"missing-context-param",
-		"background-context",
-		"http-client-without-timeout",
-		"resource-not-closed",
-		"untested-exported-surface",
-		"duplicate-string-literal",
-		"magic-number",
-		"long-switch",
-		"long-if-chain",
-		"large-composite-literal",
-		"naked-return",
-		"too-many-returns",
-		"deep-anonymous-function",
-		"dead-code",
-		"large-file",
-		"large-package",
-	}, s.ASTByRule)
+	printCountTable("by rule", diago.AuditRuleOrder(), s.ASTByRule)
 	if len(s.CriticalHigh) > 0 {
 		fmt.Println("\ncritical/high findings:")
 		for _, f := range s.CriticalHigh {
