@@ -154,7 +154,7 @@ func TestConfigDefaults(t *testing.T) {
 	cfg := &Config{}
 	cfg.defaults()
 
-	if cfg.OutputFile != "diago_findings.txt" {
+	if cfg.OutputFile != ".diago/perf.txt" {
 		t.Errorf("wrong default output: %s", cfg.OutputFile)
 	}
 	if cfg.BenchFilter != "." {

@@ -60,7 +60,7 @@ Audit:
 
 ```txt
 -target          package path (default ./...)
--output          report path (default diago_audit.txt)
+-output          report path (default .diago/audit.txt)
 -format          text or json (default text)
 -race            run go test -race
 -coverage        collect coverage (default true)
@@ -76,7 +76,7 @@ Perf:
 -target          package path (default ./...)
 -bench           benchmark regex (default .)
 -threshold       minimum cumulative percentage (default 1.0)
--output          report path (default diago_findings.txt)
+-output          report path (default .diago/perf.txt)
 -format          text or json (default text)
 ```
 
@@ -89,6 +89,7 @@ diago upgrade v0.1.0    # installs a specific version
 
 ## Notes
 
+- Reports are written to `.diago/` by default; add `.diago/` to `.gitignore` or pass `-output`.
 - `go install` writes to `$(go env GOPATH)/bin`; make sure that directory is on `PATH`.
 - Audit mode does not require benchmarks.
 - Perf mode requires `func BenchmarkX(b *testing.B)` benchmarks.

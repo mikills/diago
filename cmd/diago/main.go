@@ -109,7 +109,7 @@ func stripPerfFlag(args []string) ([]string, bool) {
 func runProfile(args []string) {
 	fs := flag.NewFlagSet("profile", flag.ExitOnError)
 	target := fs.String("target", "./...", "package path to profile")
-	output := fs.String("output", "diago_findings.txt", "output file for findings")
+	output := fs.String("output", ".diago/perf.txt", "output file for findings")
 	bench := fs.String("bench", ".", "benchmark filter regex")
 	threshold := fs.Float64("threshold", 1.0, "minimum cumulative percentage to report")
 	format := fs.String("format", "text", "output format: text or json")
@@ -189,7 +189,7 @@ func runCompare(args []string) {
 func runAudit(args []string) {
 	fs := flag.NewFlagSet("audit", flag.ExitOnError)
 	target := fs.String("target", "./...", "package path to audit")
-	output := fs.String("output", "diago_audit.txt", "output file for audit")
+	output := fs.String("output", ".diago/audit.txt", "output file for audit")
 	format := fs.String("format", "text", "output format: text or json")
 	race := fs.Bool("race", false, "run go test -race")
 	coverage := fs.Bool("coverage", true, "run go test -coverprofile and summarize coverage")

@@ -72,7 +72,7 @@ func (c *AuditConfig) defaults() {
 		c.TargetPath = "./..."
 	}
 	if c.OutputFile == "" {
-		c.OutputFile = "diago_audit.txt"
+		c.OutputFile = ".diago/audit.txt"
 	}
 	if c.Format == "" {
 		c.Format = FormatText
@@ -314,6 +314,9 @@ func runDeps(workDir, target string) ([]string, AuditCheck) {
 
 // WriteAuditReport writes audit results to disk.
 func WriteAuditReport(path string, report *AuditReport, format OutputFormat) error {
+	if err := ensureOutputDir(path); err != nil {
+		return err
+	}
 	if format == FormatJSON {
 		data, err := json.MarshalIndent(report, "", "  ")
 		if err != nil {
@@ -325,6 +328,9 @@ func WriteAuditReport(path string, report *AuditReport, format OutputFormat) err
 }
 
 func writeAuditText(path string, report *AuditReport) error {
+	if err := ensureOutputDir(path); err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "=== diago audit ===\n")
 	fmt.Fprintf(&buf, "target: %s\n", report.Target)

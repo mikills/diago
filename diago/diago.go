@@ -110,7 +110,7 @@ type Config struct {
 
 func (c *Config) defaults() {
 	if c.OutputFile == "" {
-		c.OutputFile = "diago_findings.txt"
+		c.OutputFile = ".diago/perf.txt"
 	}
 	if c.BenchFilter == "" {
 		c.BenchFilter = "."
@@ -269,6 +269,9 @@ func CompareReports(before, after *Report) *CompareReport {
 
 // WriteCompareReport writes comparison results to disk.
 func WriteCompareReport(path string, cr *CompareReport, format OutputFormat) error {
+	if err := ensureOutputDir(path); err != nil {
+		return err
+	}
 	switch format {
 	case FormatJSON:
 		data, err := json.MarshalIndent(cr, "", "  ")
@@ -760,7 +763,18 @@ func writeOutput(path string, report *Report, format OutputFormat) error {
 	}
 }
 
+func ensureOutputDir(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	return os.MkdirAll(dir, 0755)
+}
+
 func writeJSON(path string, report *Report) error {
+	if err := ensureOutputDir(path); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return err
@@ -769,6 +783,9 @@ func writeJSON(path string, report *Report) error {
 }
 
 func writeText(path string, report *Report) error {
+	if err := ensureOutputDir(path); err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 
 	fmt.Fprintf(&buf, "=== diago findings ===\n")
@@ -834,6 +851,9 @@ func writeFindingsSection(buf *bytes.Buffer, title string, findings []Finding, t
 }
 
 func writeCompareText(path string, cr *CompareReport) error {
+	if err := ensureOutputDir(path); err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 
 	fmt.Fprintf(&buf, "=== comparison report ===\n\n")

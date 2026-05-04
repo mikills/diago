@@ -5,8 +5,8 @@ TARGET ?= ./...
 BENCH ?= .
 THRESHOLD ?= 1.0
 FORMAT ?= text
-AUDIT_OUT ?= gen/diago_audit.$(if $(filter json,$(FORMAT)),json,txt)
-PERF_OUT ?= gen/diago_findings.$(if $(filter json,$(FORMAT)),json,txt)
+AUDIT_OUT ?= .diago/audit.$(if $(filter json,$(FORMAT)),json,txt)
+PERF_OUT ?= .diago/perf.$(if $(filter json,$(FORMAT)),json,txt)
 
 .PHONY: build analytics audit perf clean test release release-major
 

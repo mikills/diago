@@ -1,6 +1,7 @@
+.diago/
 gen/
 dist/
 diago.test
-*.profCAN
+*.prof
 *.out
 *.DS_Store
