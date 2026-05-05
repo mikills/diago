@@ -41,21 +41,22 @@ type SummaryItem struct {
 
 // Report holds all profiling results.
 type Report struct {
-	Package         string          `json:"package"`
-	BenchFilter     string          `json:"bench_filter"`
-	Threshold       float64         `json:"threshold"`
-	Summary         []SummaryItem   `json:"summary"`
-	BenchmarkOutput string          `json:"benchmark_output"`
-	CPUFindings     []Finding       `json:"cpu_findings"`
-	MemFindings     []Finding       `json:"mem_findings"`
-	MutexFindings   []Finding       `json:"mutex_findings"`
-	BlockFindings   []Finding       `json:"block_findings"`
-	EscapeFindings  []EscapeFinding `json:"escape_findings"`
-	RawCPU          string          `json:"raw_cpu"`
-	RawMem          string          `json:"raw_mem"`
-	RawMutex        string          `json:"raw_mutex"`
-	RawBlock        string          `json:"raw_block"`
-	RawEscape       string          `json:"raw_escape"`
+	Package         string               `json:"package"`
+	BenchFilter     string               `json:"bench_filter"`
+	Threshold       float64              `json:"threshold"`
+	Summary         []SummaryItem        `json:"summary"`
+	Recommendations []PerfRecommendation `json:"recommendations,omitempty"`
+	BenchmarkOutput string               `json:"benchmark_output"`
+	CPUFindings     []Finding            `json:"cpu_findings"`
+	MemFindings     []Finding            `json:"mem_findings"`
+	MutexFindings   []Finding            `json:"mutex_findings"`
+	BlockFindings   []Finding            `json:"block_findings"`
+	EscapeFindings  []EscapeFinding      `json:"escape_findings"`
+	RawCPU          string               `json:"raw_cpu"`
+	RawMem          string               `json:"raw_mem"`
+	RawMutex        string               `json:"raw_mutex"`
+	RawBlock        string               `json:"raw_block"`
+	RawEscape       string               `json:"raw_escape"`
 }
 
 // ChangedFinding tracks how a hotspot changed between two runs.
@@ -139,11 +140,13 @@ func Run(cfg Config) (*Report, error) {
 	}
 
 	report := &Report{Package: cfg.TargetPath, BenchFilter: cfg.BenchFilter, Threshold: cfg.Threshold}
-	if err := collectProfiles(report, cfg, workDir, targetPath, tmpDir); err != nil {
+	files, err := collectProfiles(report, cfg, workDir, targetPath, tmpDir)
+	if err != nil {
 		return nil, err
 	}
 	collectEscapeAnalysis(report, workDir, targetPath)
 	report.Summary = buildSummary(report)
+	report.Recommendations = buildPerfRecommendations(report, files, 5)
 
 	if err := writeOutput(cfg.OutputFile, report, cfg.Format); err != nil {
 		return nil, fmt.Errorf("writing findings: %w", err)
@@ -166,12 +169,12 @@ func prepareProfileTarget(cfg Config) (workDir, targetPath string, err error) {
 	return workDir, targetPath, nil
 }
 
-func collectProfiles(report *Report, cfg Config, workDir, targetPath, tmpDir string) error {
+func collectProfiles(report *Report, cfg Config, workDir, targetPath, tmpDir string) (profileFiles, error) {
 	files, err := runProfileBenchmarks(report, cfg, workDir, targetPath, tmpDir)
 	if err != nil {
-		return err
+		return files, err
 	}
-	return parseProfiles(report, cfg.Threshold, files)
+	return files, parseProfiles(report, cfg.Threshold, files)
 }
 
 type profileFiles struct{ cpu, mem, mutex, block string }
@@ -807,6 +810,8 @@ func writeText(path string, report *Report) error {
 		}
 	}
 
+	writePerfRecommendationsText(&buf, report.Recommendations)
+
 	fmt.Fprintf(&buf, "\n--- benchmark output ---\n")
 	fmt.Fprintf(&buf, "%s\n", report.BenchmarkOutput)
 
@@ -831,6 +836,52 @@ func writeText(path string, report *Report) error {
 	fmt.Fprintf(&buf, "\n--- raw escape analysis output ---\n%s\n", report.RawEscape)
 
 	return os.WriteFile(path, buf.Bytes(), 0644)
+}
+
+func writePerfRecommendationsText(buf *bytes.Buffer, recommendations []PerfRecommendation) {
+	if len(recommendations) == 0 {
+		return
+	}
+	fmt.Fprintf(buf, "\n--- performance recommendations ---\n")
+	for _, rec := range recommendations {
+		fmt.Fprintf(buf, "%s [%s] %s:%d %s — %.2f%% cumulative %s\n", rec.ProfileType, rec.Severity, rec.File, rec.Line, rec.Function, rec.CumPct, rec.ProfileType)
+		if rec.Source != "" {
+			fmt.Fprintf(buf, "  > %s\n", rec.Source)
+		}
+		writeSymbolSummaryText(buf, rec.Symbols, "  ")
+		for _, signal := range rec.Signals {
+			fmt.Fprintf(buf, "  signal: %s\n", signal)
+		}
+		fmt.Fprintf(buf, "  %s\n", rec.Message)
+		if rec.PProfList != "" {
+			fmt.Fprintf(buf, "  pprof list:\n%s\n", indentBlock(rec.PProfList, "    "))
+		}
+	}
+}
+
+func writeSymbolSummaryText(buf *bytes.Buffer, symbols SymbolSummary, prefix string) {
+	writeList := func(label string, values []string) {
+		if len(values) > 0 {
+			fmt.Fprintf(buf, "%s%s: %s\n", prefix, label, strings.Join(values, ", "))
+		}
+	}
+	writeList("vars", symbols.AssignedVars)
+	writeList("calls", symbols.CalledFuncs)
+	writeList("args", symbols.Args)
+	writeList("allocs", symbols.AllocatedTypes)
+	writeList("selectors", symbols.SelectorBases)
+	writeList("append targets", symbols.AppendTargets)
+}
+
+func indentBlock(text, prefix string) string {
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func writeFindingsSection(buf *bytes.Buffer, title string, findings []Finding, threshold float64) {

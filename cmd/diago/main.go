@@ -90,7 +90,7 @@ func runUpgrade(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("upgrade complete")
-	fmt.Println("note: go install writes to $(go env GOPATH)/bin; make sure that directory is on PATH")
+	fmt.Println("note: go install writes to $(go env GOPATH)/bin. Make sure that directory is on PATH")
 }
 
 func stripPerfFlag(args []string) ([]string, bool) {
@@ -146,13 +146,50 @@ func printPerfSummary(report *diago.Report) {
 		return
 	}
 	fmt.Println("\ntop findings:")
+	recommendations := perfRecommendationsByFinding(report.Recommendations)
 	for _, item := range report.Summary {
 		fmt.Printf("  - [%s] %.2f%% %s", item.ProfileType, item.CumPct, item.Function)
 		if item.File != "" {
 			fmt.Printf(" at %s:%d", item.File, item.Line)
 		}
 		fmt.Println()
+		if rec, ok := recommendations[perfRecommendationKey(item.ProfileType, item.Function, item.File, item.Line)]; ok {
+			if rec.Source != "" {
+				fmt.Printf("    > %s\n", rec.Source)
+			}
+			printSymbolSummary(rec.Symbols, "    ")
+			for _, signal := range rec.Signals {
+				fmt.Printf("    signal: %s\n", signal)
+			}
+			fmt.Printf("    recommendation: %s\n", rec.Message)
+		}
 	}
+}
+
+func printSymbolSummary(symbols diago.SymbolSummary, prefix string) {
+	printList := func(label string, values []string) {
+		if len(values) > 0 {
+			fmt.Printf("%s%s: %s\n", prefix, label, strings.Join(values, ", "))
+		}
+	}
+	printList("vars", symbols.AssignedVars)
+	printList("calls", symbols.CalledFuncs)
+	printList("args", symbols.Args)
+	printList("allocs", symbols.AllocatedTypes)
+	printList("selectors", symbols.SelectorBases)
+	printList("append targets", symbols.AppendTargets)
+}
+
+func perfRecommendationsByFinding(recommendations []diago.PerfRecommendation) map[string]diago.PerfRecommendation {
+	out := make(map[string]diago.PerfRecommendation, len(recommendations))
+	for _, rec := range recommendations {
+		out[perfRecommendationKey(rec.ProfileType, rec.Function, rec.File, rec.Line)] = rec
+	}
+	return out
+}
+
+func perfRecommendationKey(profileType, function, file string, line int) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%d", profileType, function, file, line)
 }
 
 func runCompare(args []string) {
@@ -192,10 +229,10 @@ func runAudit(args []string) {
 	output := fs.String("output", ".diago/audit.txt", "output file for audit")
 	format := fs.String("format", "text", "output format: text or json")
 	race := fs.Bool("race", false, "run go test -race")
-	coverage := fs.Bool("coverage", true, "run go test -coverprofile and summarize coverage")
-	deps := fs.Bool("deps", true, "run go list -deps")
+	coverage := fs.Bool("coverage", false, "run go test -coverprofile and summarize coverage")
+	deps := fs.Bool("deps", false, "run go list -deps")
 	astChecks := fs.Bool("ast", true, "run native AST checks")
-	summaryLimit := fs.Int("summary-limit", 25, "maximum critical/high AST findings in the summary; use -1 for all")
+	summaryLimit := fs.Int("summary-limit", 25, "maximum critical/high AST findings in the summary. Use -1 for all")
 	fs.Parse(args)
 
 	report, err := diago.RunAudit(diago.AuditConfig{
@@ -232,7 +269,21 @@ func printAuditSummary(report *diago.AuditReport, output string) {
 		fmt.Printf("dependencies: %d\n", s.DependencyCount)
 	}
 	printASTSummary(s)
+	printRecommendations(report.Recommendations)
 	fmt.Printf("\nfull report: %s\n", output)
+}
+
+func printRecommendations(recommendations []diago.Recommendation) {
+	if len(recommendations) == 0 {
+		return
+	}
+	fmt.Println("\nrecommendations:")
+	for _, rec := range recommendations {
+		fmt.Printf("  - [%s/%s] %s: %s\n", rec.Severity, rec.Confidence, rec.Rule, rec.Message)
+		if len(rec.Symbols) > 0 {
+			fmt.Printf("    symbols: %s\n", strings.Join(rec.Symbols, ", "))
+		}
+	}
 }
 
 func printASTSummary(s diago.AuditSummary) {

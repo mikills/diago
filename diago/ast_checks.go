@@ -597,7 +597,7 @@ func shouldTrackStringLiteral(s string) bool {
 		return false
 	}
 	switch s {
-	case "low", "medium", "high", "critical", "text", "json", "test", "audit", "deps", "coverage", "ast":
+	case "low", "medium", "high", "critical", "text", "json", "test", "audit", "deps", "coverage", "ast", "fmt", "os", "strings", "bytes", "path/filepath", "encoding/json":
 		return false
 	default:
 		return true

@@ -25,13 +25,14 @@ type AuditConfig struct {
 
 // AuditReport contains diagnostics from Go toolchain-only checks.
 type AuditReport struct {
-	Target       string          `json:"target"`
-	OverallPass  bool            `json:"overall_pass"`
-	Checks       []AuditCheck    `json:"checks"`
-	Summary      AuditSummary    `json:"summary"`
-	Coverage     *CoverageReport `json:"coverage,omitempty"`
-	Dependencies []string        `json:"dependencies,omitempty"`
-	ASTFindings  []ASTFinding    `json:"ast_findings,omitempty"`
+	Target          string           `json:"target"`
+	OverallPass     bool             `json:"overall_pass"`
+	Checks          []AuditCheck     `json:"checks"`
+	Summary         AuditSummary     `json:"summary"`
+	Recommendations []Recommendation `json:"recommendations,omitempty"`
+	Coverage        *CoverageReport  `json:"coverage,omitempty"`
+	Dependencies    []string         `json:"dependencies,omitempty"`
+	ASTFindings     []ASTFinding     `json:"ast_findings,omitempty"`
 }
 
 // AuditSummary is a compact rollup for humans and agent consumption.
@@ -118,6 +119,7 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 	}
 
 	report.Summary = buildAuditSummary(report, cfg.SummaryLimit)
+	report.Recommendations = BuildRecommendations(report.ASTFindings, cfg.SummaryLimit)
 
 	if err := WriteAuditReport(cfg.OutputFile, report, cfg.Format); err != nil {
 		return nil, fmt.Errorf("writing audit report: %w", err)
@@ -439,6 +441,15 @@ func writeAuditSummaryText(buf *bytes.Buffer, report *AuditReport) {
 		fmt.Fprintf(buf, "critical/high findings:\n")
 		for _, f := range s.CriticalHigh {
 			fmt.Fprintf(buf, "  %s [%s] %s:%d %s %s\n", f.Rule, f.Severity, f.File, f.Line, f.Symbol, f.Message)
+		}
+	}
+	if len(report.Recommendations) > 0 {
+		fmt.Fprintf(buf, "recommendations:\n")
+		for _, rec := range report.Recommendations {
+			fmt.Fprintf(buf, "  %s [%s/%s] %s\n", rec.Rule, rec.Severity, rec.Confidence, rec.Message)
+			if len(rec.Symbols) > 0 {
+				fmt.Fprintf(buf, "    symbols: %s\n", strings.Join(rec.Symbols, ", "))
+			}
 		}
 	}
 	if len(s.FailedCheckOutput) > 0 {
