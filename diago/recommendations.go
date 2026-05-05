@@ -104,8 +104,11 @@ func recommendationSymbols(findings []ASTFinding, limit int) []string {
 }
 
 func maxSeverity(defaultSeverity string, findings []ASTFinding) string {
-	best := defaultSeverity
-	for _, finding := range findings {
+	if len(findings) == 0 {
+		return defaultSeverity
+	}
+	best := findings[0].Severity
+	for _, finding := range findings[1:] {
 		if severityRank(finding.Severity) > severityRank(best) {
 			best = finding.Severity
 		}

@@ -242,11 +242,21 @@ func appendIgnoredCallFinding(findings *[]ASTFinding, ctx astContext, name strin
 		return
 	}
 	ident, ok := stmt.Lhs[0].(*ast.Ident)
-	if !ok || ident.Name != "_" || !isCallExpr(stmt.Rhs[0]) {
+	if !ok || ident.Name != "_" {
 		return
 	}
+	call, ok := stmt.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return
+	}
+	severity := "medium"
+	message := "call result assigned to blank identifier"
+	if isBestEffortCleanupCall(call) {
+		severity = "low"
+		message = "cleanup call result assigned to blank identifier"
+	}
 	loc := nodeLocation(ctx, stmt)
-	*findings = append(*findings, astFinding("ignored-call-result", "medium", loc, name, "call result assigned to blank identifier"))
+	*findings = append(*findings, astFinding("ignored-call-result", severity, loc, name, message))
 }
 
 func appendErrorBranchFinding(findings *[]ASTFinding, ctx astContext, name string, stmt *ast.IfStmt, returnsErr bool) {
@@ -437,7 +447,16 @@ func nodeLocation(ctx astContext, n ast.Node) astLocation {
 	return astLocation{pkg: ctx.pkg.ImportPath, file: ctx.path, line: ctx.fset.Position(n.Pos()).Line}
 }
 
-func isCallExpr(e ast.Expr) bool { _, ok := e.(*ast.CallExpr); return ok }
+func isBestEffortCleanupCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	if sel.Sel.Name == "Close" || sel.Sel.Name == "Stop" {
+		return true
+	}
+	return isIdentName(sel.X, "os") && (sel.Sel.Name == "Remove" || sel.Sel.Name == "RemoveAll")
+}
 
 func isErrNotNil(e ast.Expr) bool {
 	b, ok := e.(*ast.BinaryExpr)
