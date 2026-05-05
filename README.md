@@ -1,15 +1,13 @@
 # diago
 
-Go diagnostics from one command.
+Go diagnostics from one command. `diago` runs built-in Go checks plus native source analysis. It can also collect pprof data from benchmarks.
 
+
+## Installation
 ```sh
 go install github.com/mikills/diago/cmd/diago@latest
-diago -target ./...
 diago --version
-diago upgrade
 ```
-
-`diago` runs built-in Go checks plus native source analysis. It can also collect pprof data from benchmarks.
 
 ## Usage
 
@@ -20,23 +18,14 @@ diago -target ./...
 diago -target ./... -format json -output diago-audit.json
 diago -target ./... -race
 ```
-
-Audit runs by default:
-
-- `go test`
-- `go vet`
-- native AST checks for complexity, error handling, resource handling, context use, dead-code hints, generated-file-aware size checks, and maintainability smells
+Audit does native AST checks for complexity, error handling, resource handling, context use, dead-code hints, generated-file-aware size checks, and maintainability smells
 
 Opt into extra checks:
-
 ```sh
-diago -target ./... -coverage
-diago -target ./... -deps
 diago -target ./... -coverage -deps
 ```
 
 Disable AST checks:
-
 ```sh
 diago -target ./... -ast=false
 ```
