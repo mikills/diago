@@ -185,6 +185,7 @@ func collectLiteralSignals(signals *packageSignals, ctx astContext, file *ast.Fi
 	if ctx.isTest {
 		return
 	}
+	ignoredStrings := ignoredStringLiteralPositions(file)
 	ast.Inspect(file, func(n ast.Node) bool {
 		lit, ok := n.(*ast.BasicLit)
 		if !ok {
@@ -194,7 +195,7 @@ func collectLiteralSignals(signals *packageSignals, ctx astContext, file *ast.Fi
 		switch lit.Kind {
 		case token.STRING:
 			value, err := strconv.Unquote(lit.Value)
-			if err == nil && shouldTrackStringLiteral(value) {
+			if err == nil && !ignoredStrings[lit.Pos()] && shouldTrackStringLiteral(value) {
 				signals.strings[value] = append(signals.strings[value], loc)
 			}
 		case token.INT, token.FLOAT:
@@ -204,6 +205,23 @@ func collectLiteralSignals(signals *packageSignals, ctx astContext, file *ast.Fi
 		}
 		return true
 	})
+}
+
+func ignoredStringLiteralPositions(file *ast.File) map[token.Pos]bool {
+	ignored := map[token.Pos]bool{}
+	for _, spec := range file.Imports {
+		if spec.Path != nil {
+			ignored[spec.Path.Pos()] = true
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		field, ok := n.(*ast.Field)
+		if ok && field.Tag != nil {
+			ignored[field.Tag.Pos()] = true
+		}
+		return true
+	})
+	return ignored
 }
 
 func findExtraFunctionSignals(findings *[]ASTFinding, ctx astContext, file *ast.File) {
@@ -612,7 +630,7 @@ func countElseIfChain(stmt *ast.IfStmt) int {
 }
 
 func shouldTrackStringLiteral(s string) bool {
-	if len(s) < 3 || looksLikeFormatString(s) {
+	if len(s) < 3 || looksLikeFormatString(s) || looksLikeImportPath(s) || looksLikeStructTag(s) {
 		return false
 	}
 	switch s {
@@ -624,6 +642,14 @@ func shouldTrackStringLiteral(s string) bool {
 }
 
 func looksLikeFormatString(s string) bool { return strings.Contains(s, "%") }
+
+func looksLikeImportPath(s string) bool {
+	return strings.Contains(s, "/") && !strings.ContainsAny(s, " \t\n")
+}
+
+func looksLikeStructTag(s string) bool {
+	return strings.Contains(s, ":\"") && !strings.ContainsAny(s, "\n")
+}
 
 func isAllowedNumberLiteral(s string) bool {
 	s = strings.TrimPrefix(strings.ToLower(s), "0x")

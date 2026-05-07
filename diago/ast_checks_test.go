@@ -62,3 +62,48 @@ func ignoredCallFindings(t *testing.T, source string) []ASTFinding {
 	}
 	return findings
 }
+
+func TestCollectLiteralSignals(t *testing.T) {
+	t.Run("skips imports and struct tags", func(t *testing.T) {
+		file := parseLiteralTestFile(t, `package sample
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"github.com/mikills/minnow/kb"
+)
+
+type record struct {
+	ID string `+"`json:\"kb_id\"`"+`
+}
+
+const a = "real duplicate"
+const b = "real duplicate"
+const c = "real duplicate"
+const d = "real duplicate"
+const e = "real duplicate"
+const f = "real duplicate"
+`)
+		signals := newPackageSignals(goListPackage{})
+		collectLiteralSignals(signals, astContext{fset: token.NewFileSet(), path: "sample.go"}, file)
+
+		for _, literal := range []string{"context", "errors", "log/slog", "github.com/mikills/minnow/kb", `json:"kb_id"`} {
+			if got := len(signals.strings[literal]); got != 0 {
+				t.Fatalf("literal %q tracked %d times, want 0", literal, got)
+			}
+		}
+		if got := len(signals.strings["real duplicate"]); got != 6 {
+			t.Fatalf("real duplicate tracked %d times, want 6", got)
+		}
+	})
+}
+
+func parseLiteralTestFile(t *testing.T, source string) *ast.File {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "sample.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
