@@ -20,6 +20,7 @@ type AuditConfig struct {
 	Coverage     bool         `json:"coverage"`
 	Deps         bool         `json:"deps"`
 	AST          bool         `json:"ast"`
+	Modernize    bool         `json:"modernize"`
 	SummaryLimit int          `json:"summary_limit"`
 }
 
@@ -116,6 +117,12 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 		findings, check := runASTAudit(workDir, targetPath)
 		report.addCheck(check)
 		report.ASTFindings = findings
+	}
+
+	if cfg.Modernize {
+		findings, check := runModernizeAudit(workDir, targetPath)
+		report.addCheck(check)
+		report.ASTFindings = append(report.ASTFindings, findings...)
 	}
 
 	report.Summary = buildAuditSummary(report, cfg.SummaryLimit)
@@ -402,6 +409,7 @@ func AuditRuleOrder() []string {
 		"dead-code",
 		"large-file",
 		"large-package",
+		"modernize",
 	}
 }
 

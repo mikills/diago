@@ -22,8 +22,7 @@ Audit does native AST checks for complexity, error handling, resource handling, 
 
 Opt into extra checks:
 ```sh
-diago -target ./... -coverage -deps
-```
+diago -target ./... -coverage -deps -modernize
 
 Disable AST checks:
 ```sh
@@ -109,6 +108,7 @@ Audit:
 -coverage        collect coverage (default false)
 -deps            list dependencies (default false)
 -ast             run native AST checks (default true)
+-modernize       run gopls modernize diagnostics (default false)
 -summary-limit   max critical/high findings in summary. Use -1 for all (default 25)
 ```
 
