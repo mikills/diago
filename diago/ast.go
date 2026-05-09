@@ -134,12 +134,23 @@ func isGeneratedFile(path string, file *ast.File) bool {
 }
 
 func appendLargePackageFinding(findings *[]ASTFinding, dir string, stats packageStats) {
-	if stats.lines <= 5000 && stats.files <= 40 && stats.funcs <= 200 {
+	largeSignals := 0
+	if stats.files > 50 {
+		largeSignals++
+	}
+	if stats.funcs > 250 {
+		largeSignals++
+	}
+	if stats.lines > 6000 {
+		largeSignals++
+	}
+	if largeSignals == 0 {
 		return
 	}
-	sev := "medium"
-	if stats.lines > 10000 || stats.files > 80 || stats.funcs > 400 {
-		sev = "high"
+
+	sev := "low"
+	if largeSignals >= 2 || stats.files > 80 || stats.funcs > 500 || stats.lines > 12000 {
+		sev = "medium"
 	}
 	loc := astLocation{pkg: stats.importPath, file: dir, line: 1}
 	msg := fmt.Sprintf("package has %d files, %d funcs, %d lines", stats.files, stats.funcs, stats.lines)
