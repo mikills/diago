@@ -409,6 +409,7 @@ func AuditRuleOrder() []string {
 		"dead-code",
 		"large-file",
 		"large-package",
+		"long-test-name",
 		"modernize",
 	}
 }
