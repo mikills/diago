@@ -107,3 +107,67 @@ func parseLiteralTestFile(t *testing.T, source string) *ast.File {
 	}
 	return file
 }
+
+func TestLongTestNameFinding(t *testing.T) {
+	t.Run("flags long test names", func(t *testing.T) {
+		findings := longTestNameFindings(t, `package sample
+
+import "testing"
+
+func TestParseEscapeOutputValidOutputWithMultipleHeapEscapes(t *testing.T) {}
+`)
+		if len(findings) != 1 {
+			t.Fatalf("got %d findings, want 1", len(findings))
+		}
+		if findings[0].Rule != "long-test-name" || findings[0].Severity != "low" {
+			t.Fatalf("unexpected finding: %#v", findings[0])
+		}
+	})
+
+	t.Run("ignores short test names", func(t *testing.T) {
+		findings := longTestNameFindings(t, `package sample
+
+import "testing"
+
+func TestParseEscapeOutput(t *testing.T) {}
+`)
+		if len(findings) != 0 {
+			t.Fatalf("got %d findings, want 0", len(findings))
+		}
+	})
+
+	t.Run("matches the requested rg threshold", func(t *testing.T) {
+		findings := longTestNameFindings(t, `package sample
+
+import "testing"
+
+func TestABCDEFGHIJKLMNOPQRSTUVWXY1234567(t *testing.T) {}
+func TestABCDEFGHIJKLMNOPQRSTUVWXY123456(t *testing.T) {}
+`)
+		if len(findings) != 1 {
+			t.Fatalf("got %d findings, want 1", len(findings))
+		}
+		if findings[0].Symbol != "TestABCDEFGHIJKLMNOPQRSTUVWXY1234567" {
+			t.Fatalf("symbol = %q", findings[0].Symbol)
+		}
+	})
+}
+
+func longTestNameFindings(t *testing.T, source string) []ASTFinding {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sample_test.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := astContext{fset: fset, path: "sample_test.go", isTest: true}
+	var findings []ASTFinding
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		analyzeFunc(&findings, ctx, fn)
+	}
+	return findings
+}

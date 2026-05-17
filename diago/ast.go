@@ -10,8 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var longTestNamePattern = regexp.MustCompile(`^Test[A-Za-z0-9_]{32,}$`)
 
 // ASTFinding is a native source-structure finding from Go's parser/AST.
 type ASTFinding struct {
@@ -181,11 +184,26 @@ func listPackages(workDir, target string) ([]goListPackage, error) {
 
 func analyzeFunc(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl) {
 	name := funcName(fn)
-	if !ctx.isTest {
+	if ctx.isTest {
+		appendLongTestNameFinding(findings, ctx, fn, name)
+	} else {
 		appendFunctionMetricFindings(findings, ctx, fn, name)
 	}
 	findDangerousCalls(findings, ctx, fn, name)
 	findLoopHazards(findings, loopContext{pkg: ctx.pkg.ImportPath, path: ctx.path, fset: ctx.fset, fn: name}, fn.Body, 0)
+}
+
+func appendLongTestNameFinding(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl, name string) {
+	if !isLongScenarioTestName(fn.Name.Name) {
+		return
+	}
+	loc := astLocation{pkg: ctx.pkg.ImportPath, file: ctx.path, line: ctx.fset.Position(fn.Pos()).Line}
+	msg := fmt.Sprintf("test name has %d characters after Test. Prefer t.Run scenarios for long cases", len(fn.Name.Name)-len("Test"))
+	*findings = append(*findings, astFinding("long-test-name", "low", loc, name, msg))
+}
+
+func isLongScenarioTestName(name string) bool {
+	return longTestNamePattern.MatchString(name)
 }
 
 func appendFunctionMetricFindings(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl, name string) {
