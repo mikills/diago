@@ -22,6 +22,8 @@ type AuditConfig struct {
 	AST          bool         `json:"ast"`
 	Modernize    bool         `json:"modernize"`
 	ModernizeFix bool         `json:"modernize_fix"`
+	DeadCode     bool         `json:"deadcode"`
+	DeadCodeFix  bool         `json:"deadcode_fix"`
 	SummaryLimit int          `json:"summary_limit"`
 }
 
@@ -98,33 +100,7 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 
 	report.addCheck(runAuditCommand(workDir, "test", "go", "test", targetPath))
 	report.addCheck(runAuditCommand(workDir, "vet", "go", "vet", targetPath))
-	if cfg.Race {
-		report.addCheck(runAuditCommand(workDir, "race", "go", "test", "-race", targetPath))
-	}
-
-	if cfg.Coverage {
-		coverage, check := runCoverage(workDir, targetPath)
-		report.addCheck(check)
-		report.Coverage = coverage
-	}
-
-	if cfg.Deps {
-		deps, check := runDeps(workDir, targetPath)
-		report.addCheck(check)
-		report.Dependencies = deps
-	}
-
-	if cfg.AST {
-		findings, check := runASTAudit(workDir, targetPath)
-		report.addCheck(check)
-		report.ASTFindings = findings
-	}
-
-	if cfg.Modernize || cfg.ModernizeFix {
-		findings, check := runModernizeAudit(workDir, targetPath, cfg.ModernizeFix)
-		report.addCheck(check)
-		report.ASTFindings = append(report.ASTFindings, findings...)
-	}
+	runOptionalAuditChecks(report, cfg, workDir, targetPath)
 
 	report.Summary = buildAuditSummary(report, cfg.SummaryLimit)
 	report.Recommendations = BuildRecommendations(report.ASTFindings, cfg.SummaryLimit)
@@ -133,6 +109,64 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 		return nil, fmt.Errorf("writing audit report: %w", err)
 	}
 	return report, nil
+}
+
+func runOptionalAuditChecks(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+	if cfg.Race {
+		report.addCheck(runAuditCommand(workDir, "race", "go", "test", "-race", targetPath))
+	}
+	runCoverageAuditCheck(report, cfg, workDir, targetPath)
+	runDepsAuditCheck(report, cfg, workDir, targetPath)
+	runASTAuditCheck(report, cfg, workDir, targetPath)
+	runModernizeAuditCheck(report, cfg, workDir, targetPath)
+	runDeadCodeFixCheck(report, cfg, workDir, targetPath)
+}
+
+func runCoverageAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+	if !cfg.Coverage {
+		return
+	}
+	coverage, check := runCoverage(workDir, targetPath)
+	report.addCheck(check)
+	report.Coverage = coverage
+}
+
+func runDepsAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+	if !cfg.Deps {
+		return
+	}
+	deps, check := runDeps(workDir, targetPath)
+	report.addCheck(check)
+	report.Dependencies = deps
+}
+
+func runASTAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+	if !cfg.AST {
+		return
+	}
+	findings, check := runASTAudit(workDir, targetPath)
+	report.addCheck(check)
+	report.ASTFindings = findings
+}
+
+func runModernizeAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+	if !cfg.Modernize && !cfg.ModernizeFix {
+		return
+	}
+	findings, check := runModernizeAudit(workDir, targetPath, cfg.ModernizeFix)
+	report.addCheck(check)
+	report.ASTFindings = append(report.ASTFindings, findings...)
+}
+
+func runDeadCodeFixCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+	if !cfg.DeadCodeFix {
+		return
+	}
+	check := removeDeadCodeFindings(report.ASTFindings)
+	report.addCheck(check)
+	if check.Passed {
+		report.addCheck(runAuditCommand(workDir, "test-after-deadcode-fix", "go", "test", targetPath))
+	}
 }
 
 func (r *AuditReport) addCheck(check AuditCheck) {

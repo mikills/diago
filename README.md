@@ -24,6 +24,8 @@ Opt into extra checks:
 ```sh
 diago -target ./... -coverage -deps -modernize
 diago -target ./... -modernize -fix
+diago -target ./... -deadcode
+diago -target ./... -deadcode -fix
 
 Disable AST checks:
 ```sh
@@ -110,7 +112,8 @@ Audit:
 -deps            list dependencies (default false)
 -ast             run native AST checks (default true)
 -modernize       run gopls modernize diagnostics (default false)
--fix             apply gopls modernize fixes. Only used with -modernize
+-deadcode        report dead-code hints. With -fix, removes narrow unexported dead functions
+-fix             apply fixes for -modernize or -deadcode
 -summary-limit   max critical/high findings in summary. Use -1 for all (default 25)
 ```
 
