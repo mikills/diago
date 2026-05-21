@@ -233,6 +233,7 @@ func runAudit(args []string) {
 	deps := fs.Bool("deps", false, "run go list -deps")
 	astChecks := fs.Bool("ast", true, "run native AST checks")
 	modernize := fs.Bool("modernize", false, "run gopls modernize diagnostics")
+	fix := fs.Bool("fix", false, "apply gopls modernize fixes. Only used with -modernize")
 	summaryLimit := fs.Int("summary-limit", 25, "maximum critical/high AST findings in the summary. Use -1 for all")
 	fs.Parse(args)
 
@@ -245,6 +246,7 @@ func runAudit(args []string) {
 		Deps:         *deps,
 		AST:          *astChecks,
 		Modernize:    *modernize,
+		ModernizeFix: *fix,
 		SummaryLimit: *summaryLimit,
 	})
 	if err != nil {

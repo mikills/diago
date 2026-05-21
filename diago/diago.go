@@ -503,8 +503,8 @@ func resolveTarget(target string) (workDir, packagePath string, err error) {
 
 func trimRecursiveTarget(target string) (string, bool) {
 	suffix := string(filepath.Separator) + "..."
-	if strings.HasSuffix(target, suffix) {
-		return strings.TrimSuffix(target, suffix), true
+	if before, ok := strings.CutSuffix(target, suffix); ok {
+		return before, true
 	}
 	return target, false
 }

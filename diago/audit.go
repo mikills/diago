@@ -21,6 +21,7 @@ type AuditConfig struct {
 	Deps         bool         `json:"deps"`
 	AST          bool         `json:"ast"`
 	Modernize    bool         `json:"modernize"`
+	ModernizeFix bool         `json:"modernize_fix"`
 	SummaryLimit int          `json:"summary_limit"`
 }
 
@@ -119,8 +120,8 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 		report.ASTFindings = findings
 	}
 
-	if cfg.Modernize {
-		findings, check := runModernizeAudit(workDir, targetPath)
+	if cfg.Modernize || cfg.ModernizeFix {
+		findings, check := runModernizeAudit(workDir, targetPath, cfg.ModernizeFix)
 		report.addCheck(check)
 		report.ASTFindings = append(report.ASTFindings, findings...)
 	}

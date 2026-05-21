@@ -486,7 +486,7 @@ func BenchmarkParseEscapeOutput(b *testing.B) {
 func BenchmarkCompareReports(b *testing.B) {
 	before := &Report{}
 	after := &Report{}
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		before.CPUFindings = append(before.CPUFindings, Finding{Function: fmt.Sprintf("fn-%d", i), CumPct: float64(i % 100)})
 		after.CPUFindings = append(after.CPUFindings, Finding{Function: fmt.Sprintf("fn-%d", i), CumPct: float64((i + 10) % 100)})
 		before.EscapeFindings = append(before.EscapeFindings, EscapeFinding{File: "a.go", Line: i, Detail: "x escapes to heap"})

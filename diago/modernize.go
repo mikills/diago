@@ -15,8 +15,12 @@ type modernizeDiagnostic struct {
 	Message  string `json:"message"`
 }
 
-func runModernizeAudit(workDir, targetPath string) ([]ASTFinding, AuditCheck) {
-	args := []string{"run", "golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest", "-json", "-test", targetPath}
+func runModernizeAudit(workDir, targetPath string, fix bool) ([]ASTFinding, AuditCheck) {
+	args := []string{"run", "golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest", "-json", "-test"}
+	if fix {
+		args = append(args, "-fix")
+	}
+	args = append(args, targetPath)
 	cmd := exec.Command("go", args...)
 	cmd.Dir = workDir
 	var out bytes.Buffer
@@ -27,6 +31,9 @@ func runModernizeAudit(workDir, targetPath string) ([]ASTFinding, AuditCheck) {
 	check := AuditCheck{Name: "modernize", Command: "go " + strings.Join(args, " "), Passed: err == nil, Output: output}
 	if err != nil {
 		check.Output = fmt.Sprintf("%v\n%s", err, output)
+		return nil, check
+	}
+	if fix {
 		return nil, check
 	}
 	findings, parseErr := parseModernizeOutput(output)
