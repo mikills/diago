@@ -26,6 +26,14 @@ diago -target ./... -coverage -deps -modernize
 diago -target ./... -modernize -fix
 diago -target ./... -deadcode
 diago -target ./... -deadcode -fix
+diago -target ./... -u1000
+```
+
+Format code and enforce line length with `golines`:
+```sh
+diago format -target . -max-len 120
+# alias: diago fmt
+```
 
 Disable AST checks:
 ```sh
@@ -113,8 +121,17 @@ Audit:
 -ast             run native AST checks (default true)
 -modernize       run gopls modernize diagnostics (default false)
 -deadcode        report dead-code hints. With -fix, removes narrow unexported dead functions
+-u1000           run Staticcheck U1000 unused-code diagnostics
 -fix             apply fixes for -modernize or -deadcode
 -summary-limit   max critical/high findings in summary. Use -1 for all (default 25)
+```
+
+Format:
+
+```txt
+-target          source directory to format (default .)
+-max-len         maximum line length passed to golines (default 120)
+-golines         golines binary to use; falls back to go run github.com/segmentio/golines@latest
 ```
 
 Perf:

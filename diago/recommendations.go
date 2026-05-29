@@ -48,6 +48,7 @@ var recommendationTemplates = map[string]recommendationTemplate{
 	"large-file":                  {"medium", "high", "Split large files around cohesive types, handlers, or workflows."},
 	"large-package":               {"medium", "medium", "Split large packages by responsibility or internal subdomain."},
 	"long-test-name":              {"low", "high", "Use t.Run scenarios instead of encoding every case detail in the test function name."},
+	"u1000":                       {"low", "high", "Review unused code reported by Staticcheck U1000 before removing it."},
 	"modernize":                   {"low", "high", "Apply safe Go modernization suggestions when your supported Go version allows it."},
 }
 

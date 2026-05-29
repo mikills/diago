@@ -24,6 +24,7 @@ type AuditConfig struct {
 	ModernizeFix bool         `json:"modernize_fix"`
 	DeadCode     bool         `json:"deadcode"`
 	DeadCodeFix  bool         `json:"deadcode_fix"`
+	U1000        bool         `json:"u1000"`
 	SummaryLimit int          `json:"summary_limit"`
 }
 
@@ -119,6 +120,7 @@ func runOptionalAuditChecks(report *AuditReport, cfg AuditConfig, workDir, targe
 	runDepsAuditCheck(report, cfg, workDir, targetPath)
 	runASTAuditCheck(report, cfg, workDir, targetPath)
 	runModernizeAuditCheck(report, cfg, workDir, targetPath)
+	runU1000AuditCheck(report, cfg, workDir, targetPath)
 	runDeadCodeFixCheck(report, cfg, workDir, targetPath)
 }
 
@@ -154,6 +156,15 @@ func runModernizeAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targe
 		return
 	}
 	findings, check := runModernizeAudit(workDir, targetPath, cfg.ModernizeFix)
+	report.addCheck(check)
+	report.ASTFindings = append(report.ASTFindings, findings...)
+}
+
+func runU1000AuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+	if !cfg.U1000 {
+		return
+	}
+	findings, check := runU1000Audit(workDir, targetPath)
 	report.addCheck(check)
 	report.ASTFindings = append(report.ASTFindings, findings...)
 }
@@ -445,6 +456,7 @@ func AuditRuleOrder() []string {
 		"large-file",
 		"large-package",
 		"long-test-name",
+		"u1000",
 		"modernize",
 	}
 }

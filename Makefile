@@ -7,8 +7,9 @@ THRESHOLD ?= 1.0
 FORMAT ?= text
 AUDIT_OUT ?= .diago/audit.$(if $(filter json,$(FORMAT)),json,txt)
 PERF_OUT ?= .diago/perf.$(if $(filter json,$(FORMAT)),json,txt)
+MAX_LEN ?= 120
 
-.PHONY: build analytics audit perf clean test release release-major
+.PHONY: build analytics audit perf fmt modernize clean test release release-major
 
 build:
 	@mkdir -p gen
@@ -26,6 +27,12 @@ perf: build
 	@mkdir -p gen
 	$(BIN) --perf -target "$(TARGET)" -bench "$(BENCH)" -threshold "$(THRESHOLD)" -format "$(FORMAT)" -output "$(PERF_OUT)"
 	@echo "performance findings written to $(PERF_OUT)"
+
+modernize: build
+	$(BIN) -target "$(TARGET)" -ast=false -modernize -fix
+
+fmt: modernize
+	$(BIN) format -target . -max-len "$(MAX_LEN)"
 
 test:
 	go test ./...

@@ -3,9 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 
 	"github.com/mikills/diago/diago"
@@ -23,6 +26,9 @@ func main() {
 			return
 		case "compare":
 			runCompare(os.Args[2:])
+			return
+		case "format", "fmt":
+			runFormat(os.Args[2:])
 			return
 		case "audit":
 			runAudit(os.Args[2:])
@@ -91,6 +97,87 @@ func runUpgrade(args []string) {
 	}
 	fmt.Println("upgrade complete")
 	fmt.Println("note: go install writes to $(go env GOPATH)/bin. Make sure that directory is on PATH")
+}
+
+func runFormat(args []string) {
+	fs := flag.NewFlagSet("format", flag.ExitOnError)
+	target := fs.String("target", ".", "source directory to format")
+	maxLen := fs.Int("max-len", 120, "maximum line length passed to golines")
+	golines := fs.String("golines", "golines", "golines binary to use; falls back to go run github.com/segmentio/golines@latest when missing")
+	fs.Parse(args)
+
+	files, err := goFilesUnder(*target)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "format failed: %v\n", err)
+		os.Exit(1)
+	}
+	if len(files) == 0 {
+		fmt.Printf("no Go files under %s\n", *target)
+		return
+	}
+
+	fmt.Printf("gofmt -w %d Go files\n", len(files))
+	if err := runGofmt(files); err != nil {
+		fmt.Fprintf(os.Stderr, "gofmt failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	golinesCmd, golinesArgs := golinesInvocation(*golines, *maxLen, *target)
+	fmt.Printf("%s %s\n", golinesCmd, strings.Join(golinesArgs, " "))
+	cmd := exec.Command(golinesCmd, golinesArgs...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "golines failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func goFilesUnder(root string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "vendor":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(entry.Name(), ".go") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	return files, err
+}
+
+func runGofmt(files []string) error {
+	const chunkSize = 100
+	for start := 0; start < len(files); start += chunkSize {
+		end := start + chunkSize
+		if end > len(files) {
+			end = len(files)
+		}
+		args := append([]string{"-w"}, files[start:end]...)
+		cmd := exec.Command("gofmt", args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func golinesInvocation(binary string, maxLen int, target string) (string, []string) {
+	args := []string{"--max-len=" + strconv.Itoa(maxLen), "-w", target}
+	if _, err := exec.LookPath(binary); err == nil {
+		return binary, args
+	}
+	return "go", append([]string{"run", "github.com/segmentio/golines@latest"}, args...)
 }
 
 func stripPerfFlag(args []string) ([]string, bool) {
@@ -234,6 +321,7 @@ func runAudit(args []string) {
 	astChecks := fs.Bool("ast", true, "run native AST checks")
 	modernize := fs.Bool("modernize", false, "run gopls modernize diagnostics")
 	deadcode := fs.Bool("deadcode", false, "report dead-code hints")
+	u1000 := fs.Bool("u1000", false, "run Staticcheck U1000 unused-code diagnostics")
 	fix := fs.Bool("fix", false, "apply fixes for -modernize or -deadcode")
 	summaryLimit := fs.Int("summary-limit", 25, "maximum critical/high AST findings in the summary. Use -1 for all")
 	fs.Parse(args)
@@ -250,6 +338,7 @@ func runAudit(args []string) {
 		ModernizeFix: *modernize && *fix,
 		DeadCode:     *deadcode,
 		DeadCodeFix:  *deadcode && *fix,
+		U1000:        *u1000,
 		SummaryLimit: *summaryLimit,
 	})
 	if err != nil {
