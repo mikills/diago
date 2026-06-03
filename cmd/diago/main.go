@@ -39,6 +39,9 @@ func main() {
 		case "upgrade":
 			runUpgrade(os.Args[2:])
 			return
+		case "skills":
+			runSkills(os.Args[2:])
+			return
 		}
 	}
 

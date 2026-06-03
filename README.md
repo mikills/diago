@@ -145,6 +145,38 @@ Perf:
 -format          text or json (default text)
 ```
 
+## Skills
+
+Install bundled agent docs so AI coding agents know how and when to run diago. The docs are embedded in the binary, so `diago skills` always installs the version that matches your installed diago.
+
+Claude Code (default) — installs a skill:
+
+```sh
+diago skills            # install into ~/.claude/skills (user-level)
+diago skills -project   # install into ./.claude/skills (project-local)
+```
+
+Any other agent (Codex, Cursor, Copilot, …) — writes the cross-agent `AGENTS.md` convention:
+
+```sh
+diago skills -agent agents          # write ./.agents/diago.md + reference block in ./AGENTS.md
+diago skills -agent agents -dir DIR # use DIR as the project root
+```
+
+The `agents` target writes the full doc to `.agents/diago.md` and adds a managed `<!-- BEGIN diago -->`…`<!-- END diago -->` block to `AGENTS.md`. Re-running replaces that block in place and leaves the rest of your `AGENTS.md` untouched.
+
+Common flags:
+
+```txt
+-agent     target: claude (default) or agents
+-project   claude target only: install into ./.claude/skills instead of ~/.claude/skills
+-dir       destination base directory (overrides the default location)
+-force     overwrite existing files
+-list      list bundled skills without installing
+```
+
+After installing, restart Claude Code (or your agent) to pick up the new docs.
+
 ## Upgrade
 
 ```sh
