@@ -18,7 +18,9 @@ diago -target ./...
 diago -target ./... -format json -output diago-audit.json
 diago -target ./... -race
 ```
-Audit does native AST checks for complexity, error handling, resource handling, context use, dead-code hints, generated-file-aware size checks, and maintainability smells
+Audit does native AST checks for complexity, error handling, resource handling, context use, dead-code hints, size checks, and maintainability smells.
+
+Generated files (oapi-codegen `*.gen.go`, sqlc `*.sql.go`, `*.generated.*`, or any file with a `// Code generated ... DO NOT EDIT.` header) are skipped across all checks — AST, `-modernize`, and `-u1000` — since they can only be changed via codegen config, not hand edits. Pass `-include-generated` to audit them anyway.
 
 Opt into extra checks:
 ```sh
@@ -123,6 +125,7 @@ Audit:
 -deadcode        report dead-code hints. With -fix, removes narrow unexported dead functions
 -u1000           run Staticcheck U1000 unused-code diagnostics
 -fix             apply fixes for -modernize or -deadcode
+-include-generated  include findings from generated files (skipped by default)
 -summary-limit   max critical/high findings in summary. Use -1 for all (default 25)
 ```
 

@@ -26,6 +26,10 @@ type AuditConfig struct {
 	DeadCodeFix  bool         `json:"deadcode_fix"`
 	U1000        bool         `json:"u1000"`
 	SummaryLimit int          `json:"summary_limit"`
+	// IncludeGenerated keeps findings from generated files. By default they are
+	// dropped, since generated code (oapi-codegen, sqlc) can only be changed via
+	// codegen config, not hand edits.
+	IncludeGenerated bool `json:"include_generated"`
 }
 
 // AuditReport contains diagnostics from Go toolchain-only checks.
@@ -146,7 +150,7 @@ func runASTAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath 
 	if !cfg.AST {
 		return
 	}
-	findings, check := runASTAudit(workDir, targetPath)
+	findings, check := runASTAudit(workDir, targetPath, cfg.IncludeGenerated)
 	report.addCheck(check)
 	report.ASTFindings = findings
 }
@@ -157,6 +161,9 @@ func runModernizeAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targe
 	}
 	findings, check := runModernizeAudit(workDir, targetPath, cfg.ModernizeFix)
 	report.addCheck(check)
+	if !cfg.IncludeGenerated {
+		findings = filterGeneratedFindings(findings, workDir)
+	}
 	report.ASTFindings = append(report.ASTFindings, findings...)
 }
 
@@ -166,6 +173,9 @@ func runU1000AuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPat
 	}
 	findings, check := runU1000Audit(workDir, targetPath)
 	report.addCheck(check)
+	if !cfg.IncludeGenerated {
+		findings = filterGeneratedFindings(findings, workDir)
+	}
 	report.ASTFindings = append(report.ASTFindings, findings...)
 }
 
@@ -325,11 +335,14 @@ func firstLines(text string, n int) string {
 	return strings.Join(lines[:n], "\n") + fmt.Sprintf("\n... %d more lines", len(lines)-n)
 }
 
-func runASTAudit(workDir, target string) ([]ASTFinding, AuditCheck) {
+func runASTAudit(workDir, target string, includeGenerated bool) ([]ASTFinding, AuditCheck) {
 	findings, err := AnalyzeAST(workDir, target)
 	var out bytes.Buffer
 	if err != nil {
 		return nil, AuditCheck{Name: "ast", Command: "native ast analysis", Passed: false, Output: err.Error()}
+	}
+	if !includeGenerated {
+		findings = filterGeneratedFindings(findings, workDir)
 	}
 	critical := 0
 	high := 0

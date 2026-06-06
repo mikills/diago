@@ -326,23 +326,25 @@ func runAudit(args []string) {
 	deadcode := fs.Bool("deadcode", false, "report dead-code hints")
 	u1000 := fs.Bool("u1000", false, "run Staticcheck U1000 unused-code diagnostics")
 	fix := fs.Bool("fix", false, "apply fixes for -modernize or -deadcode")
+	includeGenerated := fs.Bool("include-generated", false, "include findings from generated files (skipped by default)")
 	summaryLimit := fs.Int("summary-limit", 25, "maximum critical/high AST findings in the summary. Use -1 for all")
 	fs.Parse(args)
 
 	report, err := diago.RunAudit(diago.AuditConfig{
-		TargetPath:   *target,
-		OutputFile:   *output,
-		Format:       parseFormat(*format),
-		Race:         *race,
-		Coverage:     *coverage,
-		Deps:         *deps,
-		AST:          *astChecks,
-		Modernize:    *modernize,
-		ModernizeFix: *modernize && *fix,
-		DeadCode:     *deadcode,
-		DeadCodeFix:  *deadcode && *fix,
-		U1000:        *u1000,
-		SummaryLimit: *summaryLimit,
+		TargetPath:       *target,
+		OutputFile:       *output,
+		Format:           parseFormat(*format),
+		Race:             *race,
+		Coverage:         *coverage,
+		Deps:             *deps,
+		AST:              *astChecks,
+		Modernize:        *modernize,
+		ModernizeFix:     *modernize && *fix,
+		DeadCode:         *deadcode,
+		DeadCodeFix:      *deadcode && *fix,
+		U1000:            *u1000,
+		IncludeGenerated: *includeGenerated,
+		SummaryLimit:     *summaryLimit,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

@@ -1,6 +1,7 @@
 package diago
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -121,19 +122,88 @@ func appendLargeFileFinding(findings *[]ASTFinding, pkg, path string, lineCount 
 }
 
 func isGeneratedFile(path string, file *ast.File) bool {
-	base := filepath.Base(path)
-	if strings.HasSuffix(base, ".gen.go") || strings.Contains(base, ".generated.") || strings.HasSuffix(base, ".sql.go") {
+	if hasGeneratedFilename(path) {
 		return true
 	}
 	for _, group := range file.Comments {
 		for _, comment := range group.List {
-			text := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(comment.Text, "//"), "/*"))
-			if strings.HasPrefix(text, "Code generated ") && strings.Contains(text, "DO NOT EDIT") {
+			if isGeneratedMarker(comment.Text) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// hasGeneratedFilename reports whether a filename matches a common codegen
+// naming convention (oapi-codegen *.gen.go, sqlc *.sql.go, *.generated.*).
+func hasGeneratedFilename(path string) bool {
+	base := filepath.Base(path)
+	return strings.HasSuffix(base, ".gen.go") ||
+		strings.Contains(base, ".generated.") ||
+		strings.HasSuffix(base, ".sql.go")
+}
+
+// isGeneratedMarker reports whether a comment is the standard
+// "Code generated ... DO NOT EDIT" generated-file marker.
+func isGeneratedMarker(comment string) bool {
+	text := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(comment, "//"), "/*"))
+	return strings.HasPrefix(text, "Code generated ") && strings.Contains(text, "DO NOT EDIT")
+}
+
+// isGeneratedSourcePath reports whether the file at path is generated, using
+// only its name and header. It reads the file rather than the parsed AST so it
+// can be used to filter findings from external tools (gopls, staticcheck) that
+// only report file paths. The marker must appear before the package clause.
+func isGeneratedSourcePath(path string) bool {
+	if hasGeneratedFilename(path) {
+		return true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "package ") {
+			return false
+		}
+		if isGeneratedMarker(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// filterGeneratedFindings drops findings located in generated files. Relative
+// file paths are resolved against workDir. Generated status is cached per file.
+func filterGeneratedFindings(findings []ASTFinding, workDir string) []ASTFinding {
+	cache := make(map[string]bool)
+	kept := make([]ASTFinding, 0, len(findings))
+	for _, f := range findings {
+		if f.File == "" {
+			kept = append(kept, f)
+			continue
+		}
+		path := f.File
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(workDir, path)
+		}
+		gen, ok := cache[path]
+		if !ok {
+			gen = isGeneratedSourcePath(path)
+			cache[path] = gen
+		}
+		if gen {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
 }
 
 func appendLargePackageFinding(findings *[]ASTFinding, dir string, stats packageStats) {
