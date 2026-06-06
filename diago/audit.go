@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -117,6 +118,9 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 	// Paths are made relative to the module so a committed baseline matches
 	// across machines and CI checkouts and no local home directory leaks in.
 	relativizeReport(report, workDir)
+	// Findings are produced in non-deterministic order, so sort them for a
+	// stable report a committed baseline can be diffed without churn.
+	sortFindings(report.ASTFindings)
 
 	if cfg.Baseline != "" {
 		if err := applyBaseline(report, cfg.Baseline); err != nil {
@@ -162,6 +166,31 @@ func relativizeReport(report *AuditReport, workDir string) {
 	for i := range report.Checks {
 		report.Checks[i].Output = strings.ReplaceAll(report.Checks[i].Output, prefix, "")
 	}
+}
+
+func sortFindings(findings []ASTFinding) {
+	// A total order over every field so the same source line reported under both
+	// a package and its test variant (e.g. "pkg" and "pkg [pkg.test]") always
+	// lands in the same place, keeping a committed baseline free of churn.
+	sort.SliceStable(findings, func(i, j int) bool {
+		a, b := findings[i], findings[j]
+		switch {
+		case a.File != b.File:
+			return a.File < b.File
+		case a.Line != b.Line:
+			return a.Line < b.Line
+		case a.Rule != b.Rule:
+			return a.Rule < b.Rule
+		case a.Symbol != b.Symbol:
+			return a.Symbol < b.Symbol
+		case a.Message != b.Message:
+			return a.Message < b.Message
+		case a.Package != b.Package:
+			return a.Package < b.Package
+		default:
+			return a.Severity < b.Severity
+		}
+	})
 }
 
 func runOptionalAuditChecks(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {

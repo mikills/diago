@@ -138,6 +138,28 @@ func TestRelativizeReport(t *testing.T) {
 	}
 }
 
+func TestSortFindingsIsDeterministic(t *testing.T) {
+	findings := []ASTFinding{
+		{File: "b.go", Line: 2, Rule: "r"},
+		{File: "a.go", Line: 10, Rule: "r"},
+		{File: "a.go", Line: 2, Rule: "z"},
+		{File: "a.go", Line: 2, Rule: "a"},
+	}
+	sortFindings(findings)
+
+	want := []ASTFinding{
+		{File: "a.go", Line: 2, Rule: "a"},
+		{File: "a.go", Line: 2, Rule: "z"},
+		{File: "a.go", Line: 10, Rule: "r"},
+		{File: "b.go", Line: 2, Rule: "r"},
+	}
+	for i := range want {
+		if findings[i] != want[i] {
+			t.Errorf("position %d = %+v, want %+v", i, findings[i], want[i])
+		}
+	}
+}
+
 func TestLoadAuditReportErrors(t *testing.T) {
 	if _, err := loadAuditReport(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Error("expected error for missing baseline")
