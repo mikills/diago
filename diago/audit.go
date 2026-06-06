@@ -30,6 +30,9 @@ type AuditConfig struct {
 	// dropped, since generated code (oapi-codegen, sqlc) can only be changed via
 	// codegen config, not hand edits.
 	IncludeGenerated bool `json:"include_generated"`
+	// Baseline is a JSON audit report; when set, findings already in it are
+	// dropped so the audit gates on new findings only.
+	Baseline string `json:"baseline,omitempty"`
 }
 
 // AuditReport contains diagnostics from Go toolchain-only checks.
@@ -42,6 +45,10 @@ type AuditReport struct {
 	Coverage        *CoverageReport  `json:"coverage,omitempty"`
 	Dependencies    []string         `json:"dependencies,omitempty"`
 	ASTFindings     []ASTFinding     `json:"ast_findings,omitempty"`
+	// Baseline-diff metadata, set only when a baseline was applied.
+	BaselineApplied  bool `json:"baseline_applied,omitempty"`
+	NewFindings      int  `json:"new_findings,omitempty"`
+	ResolvedFindings int  `json:"resolved_findings,omitempty"`
 }
 
 // AuditSummary is a compact rollup for humans and agent consumption.
@@ -106,6 +113,12 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 	report.addCheck(runAuditCommand(workDir, "test", "go", "test", targetPath))
 	report.addCheck(runAuditCommand(workDir, "vet", "go", "vet", targetPath))
 	runOptionalAuditChecks(report, cfg, workDir, targetPath)
+
+	if cfg.Baseline != "" {
+		if err := applyBaseline(report, cfg.Baseline); err != nil {
+			return nil, fmt.Errorf("applying baseline: %w", err)
+		}
+	}
 
 	report.Summary = buildAuditSummary(report, cfg.SummaryLimit)
 	report.Recommendations = BuildRecommendations(report.ASTFindings, cfg.SummaryLimit)
@@ -402,7 +415,11 @@ func writeAuditText(path string, report *AuditReport) error {
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "=== diago audit ===\n")
 	fmt.Fprintf(&buf, "target: %s\n", report.Target)
-	fmt.Fprintf(&buf, "overall pass: %t\n\n", report.OverallPass)
+	fmt.Fprintf(&buf, "overall pass: %t\n", report.OverallPass)
+	if report.BaselineApplied {
+		fmt.Fprintf(&buf, "baseline: %d new, %d resolved\n", report.NewFindings, report.ResolvedFindings)
+	}
+	fmt.Fprintf(&buf, "\n")
 	writeAuditSummaryText(&buf, report)
 
 	for _, check := range report.Checks {

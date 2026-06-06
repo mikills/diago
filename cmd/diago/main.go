@@ -327,6 +327,7 @@ func runAudit(args []string) {
 	u1000 := fs.Bool("u1000", false, "run Staticcheck U1000 unused-code diagnostics")
 	fix := fs.Bool("fix", false, "apply fixes for -modernize or -deadcode")
 	includeGenerated := fs.Bool("include-generated", false, "include findings from generated files (skipped by default)")
+	baseline := fs.String("baseline", "", "path to a JSON audit report; report and gate on new findings only")
 	summaryLimit := fs.Int("summary-limit", 25, "maximum critical/high AST findings in the summary. Use -1 for all")
 	fs.Parse(args)
 
@@ -344,6 +345,7 @@ func runAudit(args []string) {
 		DeadCodeFix:      *deadcode && *fix,
 		U1000:            *u1000,
 		IncludeGenerated: *includeGenerated,
+		Baseline:         *baseline,
 		SummaryLimit:     *summaryLimit,
 	})
 	if err != nil {
@@ -363,6 +365,9 @@ func printAuditSummary(report *diago.AuditReport, output string) {
 	fmt.Printf("target: %s\n", report.Target)
 	fmt.Printf("overall: %s\n", passFail(report.OverallPass))
 	fmt.Printf("checks: %d passed, %d failed\n", s.ChecksPassed, s.ChecksFailed)
+	if report.BaselineApplied {
+		fmt.Printf("baseline: %d new, %d resolved\n", report.NewFindings, report.ResolvedFindings)
+	}
 	if report.Coverage != nil {
 		fmt.Printf("coverage: %.1f%%\n", s.CoverageTotalPct)
 	}
