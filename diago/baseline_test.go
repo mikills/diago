@@ -106,6 +106,23 @@ func TestApplyBaselineCountsResolved(t *testing.T) {
 	}
 }
 
+func TestRelativizeFindings(t *testing.T) {
+	findings := []ASTFinding{
+		{File: "/repo/backend/internal/app/main.go"},
+		{File: "/repo/backend/x.go"},
+		{File: ""},
+		{File: "/elsewhere/y.go"}, // outside workDir, left untouched
+	}
+	relativizeFindings(findings, "/repo/backend")
+
+	want := []string{"internal/app/main.go", "x.go", "", "/elsewhere/y.go"}
+	for i, w := range want {
+		if findings[i].File != w {
+			t.Errorf("findings[%d].File = %q, want %q", i, findings[i].File, w)
+		}
+	}
+}
+
 func TestLoadAuditReportErrors(t *testing.T) {
 	if _, err := loadAuditReport(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Error("expected error for missing baseline")

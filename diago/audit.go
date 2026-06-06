@@ -114,6 +114,10 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 	report.addCheck(runAuditCommand(workDir, "vet", "go", "vet", targetPath))
 	runOptionalAuditChecks(report, cfg, workDir, targetPath)
 
+	// Paths are made relative to the module so a committed baseline matches
+	// across machines and CI checkouts.
+	relativizeFindings(report.ASTFindings, workDir)
+
 	if cfg.Baseline != "" {
 		if err := applyBaseline(report, cfg.Baseline); err != nil {
 			return nil, fmt.Errorf("applying baseline: %w", err)
@@ -127,6 +131,19 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 		return nil, fmt.Errorf("writing audit report: %w", err)
 	}
 	return report, nil
+}
+
+func relativizeFindings(findings []ASTFinding, workDir string) {
+	for i := range findings {
+		if findings[i].File == "" {
+			continue
+		}
+		rel, err := filepath.Rel(workDir, findings[i].File)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		findings[i].File = rel
+	}
 }
 
 func runOptionalAuditChecks(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
