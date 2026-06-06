@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -106,20 +107,34 @@ func TestApplyBaselineCountsResolved(t *testing.T) {
 	}
 }
 
-func TestRelativizeFindings(t *testing.T) {
-	findings := []ASTFinding{
-		{File: "/repo/backend/internal/app/main.go"},
-		{File: "/repo/backend/x.go"},
-		{File: ""},
-		{File: "/elsewhere/y.go"}, // outside workDir, left untouched
+func TestRelativizeReport(t *testing.T) {
+	report := &AuditReport{
+		ASTFindings: []ASTFinding{
+			{File: "/repo/backend/internal/app/main.go"},
+			{File: "/repo/backend/x.go"},
+			{File: ""},
+			{File: "/elsewhere/y.go"}, // outside workDir, left untouched
+		},
+		Checks: []AuditCheck{
+			{Name: "ast", Output: "function-length /repo/backend/main.go:68 too long"},
+			{Name: "u1000", Output: `{"file":"/repo/backend/internal/rag/p.go"}`},
+		},
 	}
-	relativizeFindings(findings, "/repo/backend")
+	relativizeReport(report, "/repo/backend")
 
-	want := []string{"internal/app/main.go", "x.go", "", "/elsewhere/y.go"}
-	for i, w := range want {
-		if findings[i].File != w {
-			t.Errorf("findings[%d].File = %q, want %q", i, findings[i].File, w)
+	wantFiles := []string{"internal/app/main.go", "x.go", "", "/elsewhere/y.go"}
+	for i, w := range wantFiles {
+		if report.ASTFindings[i].File != w {
+			t.Errorf("findings[%d].File = %q, want %q", i, report.ASTFindings[i].File, w)
 		}
+	}
+	for _, c := range report.Checks {
+		if strings.Contains(c.Output, "/repo/backend") {
+			t.Errorf("check %q output still has an absolute path: %q", c.Name, c.Output)
+		}
+	}
+	if report.Checks[0].Output != "function-length main.go:68 too long" {
+		t.Errorf("ast output = %q", report.Checks[0].Output)
 	}
 }
 

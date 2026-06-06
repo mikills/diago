@@ -115,8 +115,8 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 	runOptionalAuditChecks(report, cfg, workDir, targetPath)
 
 	// Paths are made relative to the module so a committed baseline matches
-	// across machines and CI checkouts.
-	relativizeFindings(report.ASTFindings, workDir)
+	// across machines and CI checkouts and no local home directory leaks in.
+	relativizeReport(report, workDir)
 
 	if cfg.Baseline != "" {
 		if err := applyBaseline(report, cfg.Baseline); err != nil {
@@ -133,7 +133,7 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 	return report, nil
 }
 
-func relativizeFindings(findings []ASTFinding, workDir string) {
+func relativizeReport(report *AuditReport, workDir string) {
 	// For relative or empty targets resolveTarget returns an empty workDir and
 	// the checks run in the process's working directory, so fall back to that.
 	base := workDir
@@ -144,15 +144,23 @@ func relativizeFindings(findings []ASTFinding, workDir string) {
 		}
 		base = wd
 	}
-	for i := range findings {
-		if findings[i].File == "" {
+
+	for i := range report.ASTFindings {
+		if report.ASTFindings[i].File == "" {
 			continue
 		}
-		rel, err := filepath.Rel(base, findings[i].File)
+		rel, err := filepath.Rel(base, report.ASTFindings[i].File)
 		if err != nil || strings.HasPrefix(rel, "..") {
 			continue
 		}
-		findings[i].File = rel
+		report.ASTFindings[i].File = rel
+	}
+
+	// Captured tool output (go vet, gopls, staticcheck) and our own rendered AST
+	// output embed absolute paths, so strip the base prefix from each one.
+	prefix := base + string(filepath.Separator)
+	for i := range report.Checks {
+		report.Checks[i].Output = strings.ReplaceAll(report.Checks[i].Output, prefix, "")
 	}
 }
 
