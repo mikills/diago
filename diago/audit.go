@@ -134,11 +134,21 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 }
 
 func relativizeFindings(findings []ASTFinding, workDir string) {
+	// For relative or empty targets resolveTarget returns an empty workDir and
+	// the checks run in the process's working directory, so fall back to that.
+	base := workDir
+	if base == "" || !filepath.IsAbs(base) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return
+		}
+		base = wd
+	}
 	for i := range findings {
 		if findings[i].File == "" {
 			continue
 		}
-		rel, err := filepath.Rel(workDir, findings[i].File)
+		rel, err := filepath.Rel(base, findings[i].File)
 		if err != nil || strings.HasPrefix(rel, "..") {
 			continue
 		}
