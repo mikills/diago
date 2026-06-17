@@ -21,6 +21,9 @@ var version = "dev"
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "--help", "-h", "help":
+			printUsage()
+			return
 		case "--version", "-version", "version":
 			printVersion()
 			return
@@ -55,6 +58,34 @@ func main() {
 
 func printVersion() {
 	fmt.Printf("diago %s\n", versionInfo())
+}
+
+func printUsage() {
+	fmt.Print(`diago - Go diagnostics from one command
+
+Usage:
+  diago [audit flags]         run the audit (default when no command is given)
+  diago --perf [perf flags]   profile benchmarks (CPU/mem/mutex/block/escape)
+  diago <command> [flags]
+
+Commands:
+  audit             static + toolchain audit (default command)
+  perf, profile     benchmark performance profiling (same as --perf)
+  compare           diff two perf JSON reports for improvements/regressions
+  format, fmt       format code with gofmt + golines
+  skills            install agent docs (Claude Code skill or AGENTS.md)
+  upgrade           go install the latest (or a specific) version
+  version           print version info
+
+Examples:
+  diago -target ./...                 audit the module
+  diago --perf -target ./... -bench . profile all benchmarks
+  diago compare before.json after.json
+  diago skills -agent agents          write AGENTS.md docs
+
+Run 'diago <command> -h' for command-specific flags
+(e.g. 'diago audit -h' or 'diago --perf -h').
+`)
 }
 
 func versionInfo() string {
