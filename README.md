@@ -9,6 +9,23 @@ go install github.com/mikills/diago/cmd/diago@latest
 diago --version
 ```
 
+## Workflow: fresh checkout → very good Go state
+
+diago surfaces ranked recommendations naming the exact symbols to fix. You change them, re-run, and repeat. Run the stages cheapest/safest first:
+
+```sh
+diago format -target .                              # 1. format (mechanical)
+diago -target ./...                                 # 2. get go test + go vet green
+diago -target ./... -modernize -fix                 # 3. safe auto-fixes (review the diff)
+diago -target ./... -deadcode  -fix
+diago -target ./...                                 # 4. cleanup loop: fix critical→high→medium, re-run
+diago -target ./... -race -coverage -deps -u1000    # 5. tighten with deeper checks
+diago -target ./... -format json -output .diago/baseline.json   # 6. snapshot + commit
+diago -target ./... -baseline .diago/baseline.json              #    CI gates on NEW findings only
+```
+
+Then, optionally, the performance track (needs benchmarks): capture `--perf -format json` before a change, capture again after, and `diago compare` the two. See [Performance profiling](#performance-profiling) and [Compare perf reports](#compare-perf-reports).
+
 ## Usage
 
 ### Audit (default)
@@ -125,6 +142,7 @@ Audit:
 -deadcode        report dead-code hints. With -fix, removes narrow unexported dead functions
 -u1000           run Staticcheck U1000 unused-code diagnostics
 -fix             apply fixes for -modernize or -deadcode
+-baseline        path to a JSON audit report; report and gate on new findings only
 -include-generated  include findings from generated files (skipped by default)
 -summary-limit   max critical/high findings in summary. Use -1 for all (default 25)
 ```

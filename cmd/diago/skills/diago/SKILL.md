@@ -1,6 +1,6 @@
 ---
 name: diago
-description: Run Go diagnostics, audits, and performance profiling with the diago CLI. Use when the user wants to audit a Go codebase for complexity/error-handling/resource/dead-code/maintainability issues, check coverage or run -race tests, modernize code with gopls, find unused code (Staticcheck U1000), format Go with gofmt + golines, or profile benchmarks (CPU/memory/mutex/block/escape) and compare perf reports. Triggers include "audit this Go code", "run diago", "check code complexity", "find dead code", "profile this benchmark", "modernize my Go".
+description: Run Go diagnostics, audits, and performance profiling with the diago CLI, and follow a staged workflow to take a Go codebase from a fresh checkout to a healthy state. Use when the user wants to audit a Go codebase for complexity/error-handling/resource/dead-code/maintainability issues, check coverage or run -race tests, modernize code with gopls, find unused code (Staticcheck U1000), format Go with gofmt + golines, or profile benchmarks (CPU/memory/mutex/block/escape) and compare perf reports. Triggers include "audit this Go code", "run diago", "clean up / improve this Go project", "check code complexity", "find dead code", "profile this benchmark", "modernize my Go".
 ---
 
 # diago
@@ -24,9 +24,64 @@ go install github.com/mikills/diago/cmd/diago@latest
 - **Benchmark performance** → `diago --perf`
 - **Comparing two perf runs** → `diago compare`
 
+## Recommended workflow: fresh checkout → very good Go state
+
+diago **never changes program logic for you** (apart from the opt-in mechanical `-fix` rewrites). It surfaces ranked recommendations that name the exact symbols to fix. You make the change, re-run, and repeat. Treat it as a loop, and run the stages in order — cheapest and safest first, deepest last. When asked to "clean up", "improve", or "get this Go project to a good state", follow this sequence.
+
+**Stage 1 — Format (mechanical, zero logic change).**
+```sh
+diago format -target .
+```
+
+**Stage 2 — Get correctness green.** The audit runs `go test` and `go vet` first and gates on them.
+```sh
+diago -target ./...
+```
+Fix any failing tests or vet errors before touching anything else.
+
+**Stage 3 — Safe auto-fixes.** Apply the mechanical rewrites, then review the diff and re-run tests.
+```sh
+diago -target ./... -modernize -fix    # gopls modernizations
+diago -target ./... -deadcode  -fix    # remove narrow unexported dead functions
+```
+
+**Stage 4 — The cleanup loop (the core).** Run the audit, read the `recommendations:` block (sorted by severity, each naming symbols), fix **critical → high → medium**, then re-run. Repeat until critical/high are gone.
+```sh
+diago -target ./...
+```
+
+**Stage 5 — Tighten with the deeper checks** once the structure is clean.
+```sh
+diago -target ./... -race -coverage -deps -u1000
+```
+`-race` catches data races, `-coverage` surfaces untested code, `-u1000` finds unused code, `-deps` shows the dependency surface.
+
+**Stage 6 — Lock it in so you never regress.** Snapshot the cleaned state and gate CI on *new* findings only:
+```sh
+diago -target ./... -format json -output .diago/baseline.json   # commit this
+diago -target ./... -baseline .diago/baseline.json              # in CI: only NEW findings fail
+```
+With `-baseline`, findings already in the snapshot are suppressed and the run reports `baseline: N new, M resolved` — so a large legacy codebase can adopt diago without drowning in pre-existing findings.
+
+## Performance track: measure → optimize → prove it
+
+Separate, optional, and only meaningful once correctness/structure are healthy. **Requires `func BenchmarkX(b *testing.B)` benchmarks.** Same loop philosophy: never guess — measure, change one thing, prove the win.
+
+1. **Capture a baseline profile:**
+   ```sh
+   diago --perf -target ./... -bench . -format json -output before.json
+   ```
+2. **Make ONE change** guided by the top findings — each names `file:line` plus the source signals (allocs, calls, append targets) behind the hotspot.
+3. **Capture again** into `after.json` with the same command.
+4. **Prove the change:**
+   ```sh
+   diago compare before.json after.json
+   ```
+   It reports improvements vs regressions across CPU/mem/mutex/block plus escapes added/removed. Keep changes small so each one is attributable, and repeat per hotspot.
+
 ## Audit (default command)
 
-Runs native AST checks for cyclomatic complexity, function length, error handling, resource handling (unclosed resources), context use, dead-code hints, generated-file-aware size checks, and maintainability smells. `audit` is the default, so `diago` with no subcommand runs it.
+Runs native AST checks for cyclomatic complexity, function length, error handling, resource handling (unclosed resources), context use, dead-code hints, size checks, and maintainability smells. `audit` is the default, so `diago` with no subcommand runs it. Generated files (`*.gen.go`, `*.sql.go`, `*.generated.*`, or a `// Code generated ... DO NOT EDIT.` header) are skipped across all checks since they can only be changed via codegen config. Pass `-include-generated` to audit them anyway.
 
 ```sh
 diago -target ./...                                   # audit the whole module
@@ -64,6 +119,8 @@ The command exits non-zero when the audit fails, so it can gate CI. A summary pr
 -deadcode        report dead-code hints. With -fix, removes narrow unexported dead functions
 -u1000           run Staticcheck U1000 unused-code diagnostics
 -fix             apply fixes for -modernize or -deadcode
+-baseline        path to a JSON audit report; report and gate on NEW findings only
+-include-generated  include findings from generated files (skipped by default)
 -summary-limit   max critical/high findings in summary. Use -1 for all (default 25)
 ```
 
@@ -112,5 +169,5 @@ diago compare -format json -output comparison.json before.json after.json
 ## Notes
 
 - Reports are written to `.diago/` by default. Add `.diago/` to `.gitignore` or pass `-output`.
-- Audit mode does not require benchmarks; perf mode does.
+- Audit mode does not require benchmarks. Perf mode does.
 - When reporting findings to the user, lead with the critical/high AST findings and the recommendations block — they name the specific symbols to fix.
