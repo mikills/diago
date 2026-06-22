@@ -40,7 +40,6 @@ type goListPackage struct {
 type packageStats struct {
 	importPath string
 	files      int
-	lines      int
 	funcs      int
 }
 
@@ -101,7 +100,6 @@ func analyzePackageFile(findings *[]ASTFinding, pkg goListPackage, file string, 
 	// large-package weighs production code only, so tests don't inflate the count.
 	if !isTest {
 		stats.files++
-		stats.lines += lineCount
 	}
 	appendLargeFileFinding(findings, pkg.ImportPath, path, lineCount, generated)
 	findCommentDebt(findings, pkg.ImportPath, path, fset, parsed)
@@ -215,27 +213,14 @@ func filterGeneratedFindings(findings []ASTFinding, workDir string) []ASTFinding
 }
 
 func appendLargePackageFinding(findings *[]ASTFinding, dir string, stats packageStats) {
-	largeSignals := 0
-	if stats.files > 50 {
-		largeSignals++
-	}
-	if stats.funcs > 250 {
-		largeSignals++
-	}
-	if stats.lines > 6000 {
-		largeSignals++
-	}
-	if largeSignals == 0 {
+	// Total lines are covered by large-file (1k per file) plus the file count, so
+	// the package only weighs file and function counts here.
+	if stats.files <= 50 && stats.funcs <= 500 {
 		return
 	}
-
-	sev := "low"
-	if largeSignals >= 2 || stats.files > 80 || stats.funcs > 500 || stats.lines > 12000 {
-		sev = "medium"
-	}
 	loc := astLocation{pkg: stats.importPath, file: dir, line: 1}
-	msg := fmt.Sprintf("package has %d files, %d funcs, %d lines", stats.files, stats.funcs, stats.lines)
-	*findings = append(*findings, astFinding("large-package", sev, loc, "", msg))
+	msg := fmt.Sprintf("package has %d files and %d funcs", stats.files, stats.funcs)
+	*findings = append(*findings, astFinding("large-package", "medium", loc, "", msg))
 }
 
 func listPackages(workDir, target string) ([]goListPackage, error) {
