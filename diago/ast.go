@@ -101,7 +101,7 @@ func analyzePackageFile(findings *[]ASTFinding, pkg goListPackage, file string, 
 	if !isTest {
 		stats.files++
 	}
-	appendLargeFileFinding(findings, pkg.ImportPath, path, lineCount, generated)
+	appendLargeFileFinding(findings, pkg.ImportPath, path, lineCount, generated, isTest)
 	findCommentDebt(findings, pkg.ImportPath, path, fset, parsed)
 
 	ctx := astContext{pkg: pkg, path: path, isTest: isTest, generated: generated, fset: fset}
@@ -118,8 +118,8 @@ func analyzePackageFile(findings *[]ASTFinding, pkg goListPackage, file string, 
 	}
 }
 
-func appendLargeFileFinding(findings *[]ASTFinding, pkg, path string, lineCount int, generated bool) {
-	if generated || lineCount <= 1000 {
+func appendLargeFileFinding(findings *[]ASTFinding, pkg, path string, lineCount int, generated, isTest bool) {
+	if generated || isTest || lineCount <= 1000 {
 		return
 	}
 	loc := astLocation{pkg: pkg, file: path, line: 1}
