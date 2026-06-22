@@ -333,28 +333,32 @@ func findContextAndTimeoutSignals(findings *[]ASTFinding, ctx astContext, fn *as
 }
 
 func findResourceCloseSignals(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl, name string) {
-	resources, closed := collectResourceCloseSignals(ctx, fn)
+	resources, resolved := collectResourceCloseSignals(ctx, fn)
 	for nameVar, loc := range resources {
-		if !closed[nameVar] {
+		if !resolved[nameVar] {
 			msg := fmt.Sprintf("%s is opened/created but Close is not called in the function", nameVar)
 			*findings = append(*findings, astFinding("resource-not-closed", "high", loc, name, msg))
 		}
 	}
 }
 
+// collectResourceCloseSignals returns opened resources and the set whose
+// ownership is resolved: Close is called, or they escape via a return.
 func collectResourceCloseSignals(ctx astContext, fn *ast.FuncDecl) (map[string]astLocation, map[string]bool) {
 	resources := map[string]astLocation{}
-	closed := map[string]bool{}
+	resolved := map[string]bool{}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if assign, ok := n.(*ast.AssignStmt); ok {
-			collectClosableAssignments(ctx, assign, resources)
-		}
-		if call, ok := n.(*ast.CallExpr); ok {
-			markClosedResource(call, closed)
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			collectClosableAssignments(ctx, node, resources)
+		case *ast.CallExpr:
+			markClosedResource(node, resolved)
+		case *ast.ReturnStmt:
+			markReturnedResources(node, resolved)
 		}
 		return true
 	})
-	return resources, closed
+	return resources, resolved
 }
 
 func collectClosableAssignments(ctx astContext, stmt *ast.AssignStmt, resources map[string]astLocation) {
@@ -368,13 +372,49 @@ func collectClosableAssignments(ctx astContext, stmt *ast.AssignStmt, resources 
 	}
 }
 
-func markClosedResource(call *ast.CallExpr, closed map[string]bool) {
+// markClosedResource resolves the root variable a Close call targets, so
+// resp.Body.Close() resolves resp.
+func markClosedResource(call *ast.CallExpr, resolved map[string]bool) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != "Close" {
 		return
 	}
-	if id, ok := sel.X.(*ast.Ident); ok {
-		closed[id.Name] = true
+	if root := rootIdent(sel.X); root != "" {
+		resolved[root] = true
+	}
+}
+
+// markReturnedResources resolves resources returned to the caller, which then
+// owns the cleanup.
+func markReturnedResources(ret *ast.ReturnStmt, resolved map[string]bool) {
+	for _, result := range ret.Results {
+		ast.Inspect(result, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok {
+				resolved[id.Name] = true
+			}
+			return true
+		})
+	}
+}
+
+// rootIdent returns the leftmost identifier name in a selector/index/deref
+// chain, or "" if there is none.
+func rootIdent(expr ast.Expr) string {
+	for {
+		switch e := expr.(type) {
+		case *ast.Ident:
+			return e.Name
+		case *ast.SelectorExpr:
+			expr = e.X
+		case *ast.IndexExpr:
+			expr = e.X
+		case *ast.StarExpr:
+			expr = e.X
+		case *ast.ParenExpr:
+			expr = e.X
+		default:
+			return ""
+		}
 	}
 }
 

@@ -171,3 +171,126 @@ func longTestNameFindings(t *testing.T, source string) []ASTFinding {
 	}
 	return findings
 }
+
+func resourceCloseFindings(t *testing.T, source string) []ASTFinding {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sample.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := astContext{fset: fset, path: "sample.go"}
+	var findings []ASTFinding
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		findResourceCloseSignals(&findings, ctx, fn, fn.Name.Name)
+	}
+	return findings
+}
+
+func TestResourceCloseSignals(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   int
+	}{
+		{
+			name: "defer close direct",
+			source: `package sample
+import "os"
+func read(p string) error {
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return nil
+}`,
+			want: 0,
+		},
+		{
+			name: "returned ownership is not a leak",
+			source: `package sample
+import "os"
+func openThing(p string) (*os.File, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}`,
+			want: 0,
+		},
+		{
+			name: "returned wrapped ownership is not a leak",
+			source: `package sample
+import "os"
+type holder struct{ f *os.File }
+func openWrapped(p string) (*holder, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	return &holder{f: f}, nil
+}`,
+			want: 0,
+		},
+		{
+			name: "http body close resolves the response",
+			source: `package sample
+import ("io"; "net/http")
+func fetch(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}`,
+			want: 0,
+		},
+		{
+			name: "genuine leak still reported",
+			source: `package sample
+import "os"
+func leak(p string) error {
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	_ = f
+	return nil
+}`,
+			want: 1,
+		},
+		{
+			name: "one returned one leaked",
+			source: `package sample
+import "os"
+func mixed(p, q string) (*os.File, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	g, err := os.Open(q)
+	if err != nil {
+		return nil, err
+	}
+	_ = g
+	return f, nil
+}`,
+			want: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := resourceCloseFindings(t, tc.source)
+			if len(findings) != tc.want {
+				t.Fatalf("got %d resource-not-closed findings, want %d: %+v", len(findings), tc.want, findings)
+			}
+		})
+	}
+}
