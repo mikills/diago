@@ -97,19 +97,25 @@ func analyzePackageFile(findings *[]ASTFinding, pkg goListPackage, file string, 
 
 	generated := isGeneratedFile(path, parsed)
 	lineCount := fileLineCount(path)
-	stats.files++
-	stats.lines += lineCount
+	isTest := strings.HasSuffix(file, "_test.go")
+	// large-package weighs production code only, so tests don't inflate the count.
+	if !isTest {
+		stats.files++
+		stats.lines += lineCount
+	}
 	appendLargeFileFinding(findings, pkg.ImportPath, path, lineCount, generated)
 	findCommentDebt(findings, pkg.ImportPath, path, fset, parsed)
 
-	ctx := astContext{pkg: pkg, path: path, isTest: strings.HasSuffix(file, "_test.go"), generated: generated, fset: fset}
+	ctx := astContext{pkg: pkg, path: path, isTest: isTest, generated: generated, fset: fset}
 	analyzeExtraFile(findings, signals, ctx, parsed)
 	for _, decl := range parsed.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
 		}
-		stats.funcs++
+		if !isTest {
+			stats.funcs++
+		}
 		analyzeFunc(findings, ctx, fn)
 	}
 }
