@@ -294,3 +294,33 @@ func mixed(p, q string) (*os.File, error) {
 		})
 	}
 }
+
+func TestExternalTestsCountAsTests(t *testing.T) {
+	exported := make([]ASTFinding, 0)
+	signals := newPackageSignals(goListPackage{
+		ImportPath:   "example.com/pkg",
+		XTestGoFiles: []string{"pkg_test.go"},
+	})
+	signals.exported = 25
+	appendPackageSignalFindings(&exported, goListPackage{ImportPath: "example.com/pkg"}, signals)
+	for _, f := range exported {
+		if f.Rule == "untested-exported-surface" {
+			t.Fatalf("external test files (XTestGoFiles) should count as tests, got finding: %s", f.Message)
+		}
+	}
+
+	// Sanity check: with no test files at all the finding still fires.
+	noTests := make([]ASTFinding, 0)
+	bare := newPackageSignals(goListPackage{ImportPath: "example.com/pkg"})
+	bare.exported = 25
+	appendPackageSignalFindings(&noTests, goListPackage{ImportPath: "example.com/pkg"}, bare)
+	found := false
+	for _, f := range noTests {
+		if f.Rule == "untested-exported-surface" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected untested-exported-surface finding when no test files exist")
+	}
+}

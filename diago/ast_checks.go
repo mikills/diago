@@ -29,7 +29,7 @@ func newPackageSignals(pkg goListPackage) *packageSignals {
 		numbers:      map[string][]astLocation{},
 		declarations: map[string]deadDeclaration{},
 		references:   map[string]int{},
-		tests:        len(pkg.TestGoFiles),
+		tests:        len(pkg.TestGoFiles) + len(pkg.XTestGoFiles),
 	}
 }
 

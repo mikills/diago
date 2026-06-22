@@ -29,11 +29,12 @@ type ASTFinding struct {
 }
 
 type goListPackage struct {
-	ImportPath  string   `json:"ImportPath"`
-	Name        string   `json:"Name"`
-	Dir         string   `json:"Dir"`
-	GoFiles     []string `json:"GoFiles"`
-	TestGoFiles []string `json:"TestGoFiles"`
+	ImportPath   string   `json:"ImportPath"`
+	Name         string   `json:"Name"`
+	Dir          string   `json:"Dir"`
+	GoFiles      []string `json:"GoFiles"`
+	TestGoFiles  []string `json:"TestGoFiles"`
+	XTestGoFiles []string `json:"XTestGoFiles"`
 }
 
 type packageStats struct {
@@ -76,6 +77,7 @@ func analyzePackage(findings *[]ASTFinding, pkg goListPackage) packageStats {
 	stats := packageStats{importPath: pkg.ImportPath}
 	signals := newPackageSignals(pkg)
 	files := append(append([]string{}, pkg.GoFiles...), pkg.TestGoFiles...)
+	files = append(files, pkg.XTestGoFiles...)
 	for _, file := range files {
 		analyzePackageFile(findings, pkg, file, &stats, signals)
 	}
