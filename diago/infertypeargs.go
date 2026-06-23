@@ -74,7 +74,7 @@ func parseInferTypeArgsOutput(output string) []ASTFinding {
 		file, lineNo := parseModernizePosition(line[:sep])
 		findings = append(findings, ASTFinding{
 			Rule:     "infertypeargs",
-			Severity: "low",
+			Severity: "medium",
 			File:     file,
 			Line:     lineNo,
 			Symbol:   "infertypeargs",
