@@ -98,6 +98,7 @@ diago -target ./... -modernize -fix   # apply the modernize fixes
 diago -target ./... -deadcode         # report dead-code hints
 diago -target ./... -deadcode -fix    # remove narrow unexported dead functions
 diago -target ./... -u1000            # Staticcheck U1000 unused-code diagnostics
+diago -target ./... -infertypeargs    # redundant explicit type arguments (gopls, report-only)
 diago -target ./... -ast=false        # disable native AST checks
 ```
 
@@ -118,6 +119,7 @@ The command exits non-zero when the audit fails, so it can gate CI. A summary pr
 -modernize       run gopls modernize diagnostics (default false)
 -deadcode        report dead-code hints. With -fix, removes narrow unexported dead functions
 -u1000           run Staticcheck U1000 unused-code diagnostics
+-infertypeargs   report redundant explicit type arguments via gopls (report-only, no -fix)
 -fix             apply fixes for -modernize or -deadcode
 -baseline        path to a JSON audit report; report and gate on NEW findings only
 -include-generated  include findings from generated files (skipped by default)

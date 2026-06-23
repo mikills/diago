@@ -46,6 +46,7 @@ diago -target ./... -modernize -fix
 diago -target ./... -deadcode
 diago -target ./... -deadcode -fix
 diago -target ./... -u1000
+diago -target ./... -infertypeargs   # report redundant explicit type arguments (gopls, report-only)
 ```
 
 Format code and enforce line length with `golines`:
@@ -141,6 +142,7 @@ Audit:
 -modernize       run gopls modernize diagnostics (default false)
 -deadcode        report dead-code hints. With -fix, removes narrow unexported dead functions
 -u1000           run Staticcheck U1000 unused-code diagnostics
+-infertypeargs   report redundant explicit type arguments via gopls (report-only, no -fix)
 -fix             apply fixes for -modernize or -deadcode
 -baseline        path to a JSON audit report; report and gate on new findings only
 -include-generated  include findings from generated files (skipped by default)

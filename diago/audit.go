@@ -26,7 +26,9 @@ type AuditConfig struct {
 	DeadCode     bool         `json:"deadcode"`
 	DeadCodeFix  bool         `json:"deadcode_fix"`
 	U1000        bool         `json:"u1000"`
-	SummaryLimit int          `json:"summary_limit"`
+	// InferTypeArgs reports redundant explicit type arguments via gopls (report-only).
+	InferTypeArgs bool `json:"infertypeargs"`
+	SummaryLimit  int  `json:"summary_limit"`
 	// IncludeGenerated keeps findings from generated files. By default they are
 	// dropped, since generated code (oapi-codegen, sqlc) can only be changed via
 	// codegen config, not hand edits.
@@ -202,6 +204,7 @@ func runOptionalAuditChecks(report *AuditReport, cfg AuditConfig, workDir, targe
 	runASTAuditCheck(report, cfg, workDir, targetPath)
 	runModernizeAuditCheck(report, cfg, workDir, targetPath)
 	runU1000AuditCheck(report, cfg, workDir, targetPath)
+	runInferTypeArgsAuditCheck(report, cfg, workDir, targetPath)
 	runDeadCodeFixCheck(report, cfg, workDir, targetPath)
 }
 
@@ -249,6 +252,18 @@ func runU1000AuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPat
 		return
 	}
 	findings, check := runU1000Audit(workDir, targetPath)
+	report.addCheck(check)
+	if !cfg.IncludeGenerated {
+		findings = filterGeneratedFindings(findings, workDir)
+	}
+	report.ASTFindings = append(report.ASTFindings, findings...)
+}
+
+func runInferTypeArgsAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+	if !cfg.InferTypeArgs {
+		return
+	}
+	findings, check := runInferTypeArgsAudit(workDir, targetPath)
 	report.addCheck(check)
 	if !cfg.IncludeGenerated {
 		findings = filterGeneratedFindings(findings, workDir)
@@ -552,6 +567,7 @@ func AuditRuleOrder() []string {
 		"long-test-name",
 		"u1000",
 		"modernize",
+		"infertypeargs",
 	}
 }
 
