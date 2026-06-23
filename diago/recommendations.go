@@ -50,6 +50,7 @@ var recommendationTemplates = map[string]recommendationTemplate{
 	"long-test-name":              {"low", "high", "Use t.Run scenarios instead of encoding every case detail in the test function name."},
 	"u1000":                       {"low", "high", "Review unused code reported by Staticcheck U1000 before removing it."},
 	"modernize":                   {"low", "high", "Apply safe Go modernization suggestions when your supported Go version allows it."},
+	"infertypeargs":               {"low", "low", "Drop redundant explicit type arguments that the compiler can infer."},
 }
 
 func BuildRecommendations(findings []ASTFinding, limit int) []Recommendation {

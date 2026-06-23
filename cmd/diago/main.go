@@ -356,6 +356,7 @@ func runAudit(args []string) {
 	modernize := fs.Bool("modernize", false, "run gopls modernize diagnostics")
 	deadcode := fs.Bool("deadcode", false, "report dead-code hints")
 	u1000 := fs.Bool("u1000", false, "run Staticcheck U1000 unused-code diagnostics")
+	inferTypeArgs := fs.Bool("infertypeargs", false, "report redundant explicit type arguments via gopls (report-only)")
 	fix := fs.Bool("fix", false, "apply fixes for -modernize or -deadcode")
 	includeGenerated := fs.Bool("include-generated", false, "include findings from generated files (skipped by default)")
 	baseline := fs.String("baseline", "", "path to a JSON audit report; report and gate on new findings only")
@@ -375,6 +376,7 @@ func runAudit(args []string) {
 		DeadCode:         *deadcode,
 		DeadCodeFix:      *deadcode && *fix,
 		U1000:            *u1000,
+		InferTypeArgs:    *inferTypeArgs,
 		IncludeGenerated: *includeGenerated,
 		Baseline:         *baseline,
 		SummaryLimit:     *summaryLimit,
