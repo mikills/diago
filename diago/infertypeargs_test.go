@@ -13,7 +13,7 @@ func TestParseInferTypeArgsOutput(t *testing.T) {
 		t.Fatalf("got %d findings, want 2: %+v", len(findings), findings)
 	}
 	for _, f := range findings {
-		if f.Rule != "infertypeargs" || f.Severity != "low" || f.Message != inferTypeArgsMessage {
+		if f.Rule != "infertypeargs" || f.Severity != "medium" || f.Message != inferTypeArgsMessage {
 			t.Fatalf("unexpected finding: %+v", f)
 		}
 	}
