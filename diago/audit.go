@@ -241,9 +241,7 @@ func runModernizeAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targe
 	}
 	findings, check := runModernizeAudit(workDir, targetPath, cfg.ModernizeFix)
 	report.addCheck(check)
-	if !cfg.IncludeGenerated {
-		findings = filterGeneratedFindings(findings, workDir)
-	}
+	findings = filterSkippedFindings(findings, workDir, cfg.IncludeGenerated)
 	report.ASTFindings = append(report.ASTFindings, findings...)
 }
 
@@ -253,9 +251,7 @@ func runU1000AuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPat
 	}
 	findings, check := runU1000Audit(workDir, targetPath)
 	report.addCheck(check)
-	if !cfg.IncludeGenerated {
-		findings = filterGeneratedFindings(findings, workDir)
-	}
+	findings = filterSkippedFindings(findings, workDir, cfg.IncludeGenerated)
 	report.ASTFindings = append(report.ASTFindings, findings...)
 }
 
@@ -265,9 +261,7 @@ func runInferTypeArgsAuditCheck(report *AuditReport, cfg AuditConfig, workDir, t
 	}
 	findings, check := runInferTypeArgsAudit(workDir, targetPath)
 	report.addCheck(check)
-	if !cfg.IncludeGenerated {
-		findings = filterGeneratedFindings(findings, workDir)
-	}
+	findings = filterSkippedFindings(findings, workDir, cfg.IncludeGenerated)
 	report.ASTFindings = append(report.ASTFindings, findings...)
 }
 
@@ -433,9 +427,7 @@ func runASTAudit(workDir, target string, includeGenerated bool) ([]ASTFinding, A
 	if err != nil {
 		return nil, AuditCheck{Name: "ast", Command: "native ast analysis", Passed: false, Output: err.Error()}
 	}
-	if !includeGenerated {
-		findings = filterGeneratedFindings(findings, workDir)
-	}
+	findings = filterSkippedFindings(findings, workDir, includeGenerated)
 	critical := 0
 	high := 0
 	for _, f := range findings {
