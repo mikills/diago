@@ -2,8 +2,12 @@ package diago
 
 import (
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -179,7 +183,19 @@ func resourceCloseFindings(t *testing.T, source string) []ASTFinding {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := astContext{fset: fset, path: "sample.go"}
+	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
+	conf := types.Config{Importer: importer.Default()}
+	if _, err := conf.Check("example.com/sample", fset, []*ast.File{file}, info); err != nil {
+		t.Fatal(err)
+	}
+	ctx := astContext{
+		pkg: goListPackage{
+			ImportPath:  "example.com/sample",
+			ownedFields: collectLifecycleOwnedFieldsFromFiles("example.com/sample", map[string]*ast.File{"sample.go": file}),
+		},
+		fset: fset, path: "sample.go", types: info,
+		releases: collectReleaseParams(map[string]*ast.File{"sample.go": file}, []string{"sample.go"}),
+	}
 	var findings []ASTFinding
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -267,6 +283,92 @@ func leak(p string) error {
 			want: 1,
 		},
 		{
+			name: "sql Rows leak is reported",
+			source: `package sample
+import "database/sql"
+func leak(db *sql.DB) error {
+	rows, err := db.Query("select 1")
+	if err != nil { return err }
+	_ = rows
+	return nil
+}`,
+			want: 1,
+		},
+		{
+			name: "http Response leak from client is reported",
+			source: `package sample
+import "net/http"
+func leak(client *http.Client, req *http.Request) error {
+	resp, err := client.Do(req)
+	if err != nil { return err }
+	_ = resp
+	return nil
+}`,
+			want: 1,
+		},
+		{
+			name: "custom closer factory name does not hide leak",
+			source: `package sample
+import "io"
+func acquire() (io.Closer, error) { return nil, nil }
+func leak() error {
+	resource, err := acquire()
+	if err != nil { return err }
+	_ = resource
+	return nil
+}`,
+			want: 1,
+		},
+		{
+			name: "non io Closer Close method is not a resource",
+			source: `package sample
+type Dialog struct{}
+func (*Dialog) Close() {}
+func NewDialog() *Dialog { return &Dialog{} }
+func build() { dialog := NewDialog(); _ = dialog }`,
+			want: 0,
+		},
+		{
+			name: "URL query values are not resources",
+			source: `package sample
+import "net/http"
+func values(r *http.Request) string {
+	query := r.URL.Query()
+	return query.Get("key")
+}`,
+			want: 0,
+		},
+		{
+			name: "ordinary Do and Get results are not resources",
+			source: `package sample
+type Group struct{}
+func (Group) Do(string, func() (any, error)) (any, error, bool) { return nil, nil, false }
+type Cache struct{}
+func (Cache) Get(string) (string, bool) { return "", false }
+func load(group Group, cache Cache) string {
+	result, _, _ := group.Do("key", func() (any, error) { return "value", nil })
+	value, _ := cache.Get("key")
+	_ = result
+	return value
+}`,
+			want: 0,
+		},
+		{
+			name: "typed closable Query result is reported",
+			source: `package sample
+type Rows struct{}
+func (*Rows) Close() error { return nil }
+type DB struct{}
+func (DB) Query(string) (*Rows, error) { return nil, nil }
+func leak(db DB) error {
+	rows, err := db.Query("select 1")
+	if err != nil { return err }
+	_ = rows
+	return nil
+}`,
+			want: 1,
+		},
+		{
 			name: "one returned one leaked",
 			source: `package sample
 import "os"
@@ -284,6 +386,160 @@ func mixed(p, q string) (*os.File, error) {
 }`,
 			want: 1,
 		},
+		{
+			name: "resource assigned to returned owner field",
+			source: `package sample
+import "io"
+type Owner struct{ resource io.Closer }
+func acquire() (io.Closer, error) { return nil, nil }
+func build() (*Owner, error) {
+	resource, err := acquire()
+	if err != nil { return nil, err }
+	owner := &Owner{}
+	owner.resource = resource
+	return owner, nil
+}`,
+			want: 0,
+		},
+		{
+			name: "resource embedded in returned struct variable",
+			source: `package sample
+import "io"
+type Owner struct{ resource io.Closer }
+func acquire() (io.Closer, error) { return nil, nil }
+func build() (*Owner, error) {
+	resource, err := acquire()
+	if err != nil { return nil, err }
+	owner := &Owner{resource: resource}
+	return owner, nil
+}`,
+			want: 0,
+		},
+		{
+			name: "resource assigned to parameter owner field",
+			source: `package sample
+import "io"
+type Owner struct{ resource io.Closer }
+func acquire() (io.Closer, error) { return nil, nil }
+func install(owner *Owner) error {
+	resource, err := acquire()
+	if err != nil { return err }
+	owner.resource = resource
+	return nil
+}`,
+			want: 0,
+		},
+		{
+			name: "interface backend transferred to lifecycle owner",
+			source: `package sample
+type Backend interface{ Close() error }
+type backend struct{}
+func (*backend) Close() error { return nil }
+func acquire() (Backend, error) { return &backend{}, nil }
+type Service struct{ backend Backend }
+func NewService(backend Backend) *Service { return &Service{backend: backend} }
+func (s *Service) Close() error { return s.backend.Close() }
+type Lifecycle struct{}
+func (*Lifecycle) OnShutdown(func()) {}
+func install(lifecycle *Lifecycle) error {
+	backend, err := acquire()
+	if err != nil { return err }
+	service := NewService(backend)
+	lifecycle.OnShutdown(func() { _ = service.Close() })
+	return nil
+}`,
+			want: 0,
+		},
+		{
+			name: "Shutdown releases resource",
+			source: `package sample
+import "context"
+type Server struct{}
+func NewServer() *Server { return &Server{} }
+func (*Server) Close() error { return nil }
+func (*Server) Shutdown(context.Context) error { return nil }
+func run(ctx context.Context) { server := NewServer(); _ = server.Shutdown(ctx) }`,
+			want: 0,
+		},
+		{
+			name: "borrowed concrete file remains caller owned",
+			source: `package sample
+import "os"
+type Wrapper struct{ file *os.File }
+func NewWrapper(file *os.File) *Wrapper { return &Wrapper{file: file} }
+func (*Wrapper) Close() error { return nil }
+func leak() {
+	file, _ := os.Open("file")
+	wrapper := NewWrapper(file)
+	_ = wrapper.Close()
+}`,
+			want: 1,
+		},
+		{
+			name: "composite field name does not transfer same named resource",
+			source: `package sample
+import "io"
+type Owner struct{ resource io.Closer }
+func acquire() (io.Closer, error) { return nil, nil }
+func leak() (*Owner, error) {
+	resource, err := acquire()
+	if err != nil { return nil, err }
+	owner := &Owner{resource: nil}
+	_ = resource
+	return owner, nil
+}`,
+			want: 1,
+		},
+		{
+			name: "resource mentioned in returned call is not transferred",
+			source: `package sample
+import ("fmt"; "io")
+func acquire() (io.Closer, error) { return nil, nil }
+func leak() error {
+	resource, err := acquire()
+	if err != nil { return err }
+	return fmt.Errorf("resource: %v", resource)
+}`,
+			want: 1,
+		},
+		{
+			name: "resource reassigned to parameter remains owned locally",
+			source: `package sample
+import "io"
+func acquire() (io.Closer, error) { return nil, nil }
+func leak(resource io.Closer) {
+	resource, _ = acquire()
+	_ = resource
+}`,
+			want: 1,
+		},
+		{
+			name: "local cleanup helper releases resource",
+			source: `package sample
+import "io"
+func acquire() (io.Closer, error) { return nil, nil }
+func release(resource io.Closer) { _ = resource.Close() }
+func use() {
+	resource, _ := acquire()
+	defer release(resource)
+}`,
+			want: 0,
+		},
+		{
+			name: "borrowed interface field remains caller owned",
+			source: `package sample
+import "io"
+type Wrapper struct{ resource io.Closer }
+func NewWrapper(resource io.Closer) *Wrapper { return &Wrapper{resource: resource} }
+func (*Wrapper) Close() error { return nil }
+func acquire() (io.Closer, error) { return nil, nil }
+func leak() {
+	resource, _ := acquire()
+	wrapper := NewWrapper(resource)
+	_ = wrapper.Close()
+}`,
+			want: 1,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -293,6 +549,208 @@ func mixed(p, q string) (*os.File, error) {
 			}
 		})
 	}
+}
+
+func TestAnalyzeASTResourceTypes(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module example.com/resources\n\ngo 1.22\n",
+		"resources.go": `package resources
+import (
+	"database/sql"
+	"io"
+	"net/http"
+	"os"
+)
+func acquire() (io.Closer, error) { return nil, nil }
+func leakFile() { resource, _ := os.Open("file"); _ = resource }
+func leakRows(db *sql.DB) { resource, _ := db.Query("select 1"); _ = resource }
+func leakResponse(client *http.Client, req *http.Request) { resource, _ := client.Do(req); _ = resource }
+func leakCustom() { resource, _ := acquire(); _ = resource }
+func closeCustom() { resource, _ := acquire(); _ = resource.Close() }
+`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	findings, err := AnalyzeAST(dir, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, finding := range findings {
+		if finding.Rule == "resource-not-closed" {
+			got[finding.Symbol] = true
+		}
+	}
+	for _, symbol := range []string{"leakFile", "leakRows", "leakResponse", "leakCustom"} {
+		if !got[symbol] {
+			t.Errorf("missing resource finding for %s: %+v", symbol, findings)
+		}
+	}
+	if got["closeCustom"] {
+		t.Errorf("closed custom resource was reported: %+v", findings)
+	}
+}
+
+func TestGeneratedExportsDoNotCountAsHandWrittenSurface(t *testing.T) {
+	generated := parseLiteralTestFile(t, `package sample
+type GeneratedOne struct{}
+func GeneratedTwo() {}`)
+	handWritten := parseLiteralTestFile(t, `package sample
+type PublicOne struct{}
+func PublicTwo() {}`)
+	signals := newPackageSignals(goListPackage{})
+	ctx := astContext{generated: true, fset: token.NewFileSet()}
+	var sink []ASTFinding
+	analyzeExtraFile(&sink, signals, ctx, generated)
+	ctx.generated = false
+	analyzeExtraFile(&sink, signals, ctx, handWritten)
+	if signals.exported != 2 {
+		t.Fatalf("exported surface = %d, want 2 hand-written declarations", signals.exported)
+	}
+
+	generatedOnly := newPackageSignals(goListPackage{ImportPath: "example.com/generated"})
+	var findings []ASTFinding
+	appendPackageSignalFindings(&findings, goListPackage{ImportPath: "example.com/generated"}, generatedOnly)
+	for _, finding := range findings {
+		if finding.Rule == "untested-exported-surface" {
+			t.Fatalf("generated-only package produced finding: %+v", finding)
+		}
+	}
+}
+
+func TestPanicOutsideMainIntent(t *testing.T) {
+	findings := dangerousCallFindings(t, `package sample
+func MustBuild() int { panic("invalid invariant") }
+func MustBuildCallback() func() { return func() { panic("callback failure") } }
+func MustServe() error { panic("returns an error") }
+func WithRollback() {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			rollback()
+			panic(recovered)
+		}
+	}()
+}
+func NestedRecoverIsNotRepanic() {
+	var recovered any
+	defer func() {
+		func() { recovered = recover() }()
+		panic(recovered)
+	}()
+}
+func ConditionalRecoverIsNotRepanic(condition bool) {
+	var recovered any
+	defer func() {
+		if condition { recovered = recover() }
+		panic(recovered)
+	}()
+}
+func ordinary() { panic("unexpected") }
+func MustCrash() { panic("still unexpected") }
+func Mustard() { panic("still unexpected") }
+func rollback() {}
+`)
+	want := map[string]bool{
+		"ConditionalRecoverIsNotRepanic": true,
+		"MustBuildCallback":              true,
+		"MustServe":                      true,
+		"NestedRecoverIsNotRepanic":      true,
+		"ordinary":                       true,
+		"MustCrash":                      true,
+		"Mustard":                        true,
+	}
+	if len(findings) != len(want) {
+		t.Fatalf("got %d panic findings, want %d: %+v", len(findings), len(want), findings)
+	}
+	for _, finding := range findings {
+		if !want[finding.Symbol] {
+			t.Fatalf("unexpected panic finding: %+v", finding)
+		}
+	}
+}
+
+func dangerousCallFindings(t *testing.T, source string) []ASTFinding {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sample.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := astContext{pkg: goListPackage{ImportPath: "example.com/sample", Name: "sample"}, fset: fset, path: "sample.go"}
+	var findings []ASTFinding
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+			findDangerousCalls(&findings, ctx, fn, fn.Name.Name)
+		}
+	}
+	return findings
+}
+
+func TestSwallowedErrorRequiresExplicitRuleDirective(t *testing.T) {
+	source := `package sample
+func lookup() error { return nil }
+func unsuppressed() error {
+	err := lookup()
+	if err != nil { return nil }
+	return nil
+}
+func proseOnly() error {
+	err := lookup()
+	// Best effort lookup.
+	if err != nil { return nil }
+	return nil
+}
+func suppressed() error {
+	err := lookup()
+	//diago:ignore swallowed-error optional lookup failure
+	if err != nil { return nil }
+	return nil
+}
+func wrongRule() error {
+	err := lookup()
+	//diago:ignore ignored-call-result
+	if err != nil { return nil }
+	return nil
+}
+func detached() error {
+	err := lookup()
+	//diago:ignore swallowed-error
+
+	if err != nil { return nil }
+	return nil
+}`
+	findings := errorHandlingFindings(t, source)
+	var swallowed []ASTFinding
+	for _, finding := range findings {
+		if finding.Rule == "swallowed-error" {
+			swallowed = append(swallowed, finding)
+		}
+	}
+	if len(swallowed) != 4 {
+		t.Fatalf("got %d swallowed-error findings, want 4 unsuppressed branches: %+v", len(swallowed), swallowed)
+	}
+}
+
+func errorHandlingFindings(t *testing.T, source string) []ASTFinding {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sample.go", source, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := astContext{fset: fset, path: "sample.go", file: file}
+	var findings []ASTFinding
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+			findErrorHandlingSignals(&findings, ctx, fn, fn.Name.Name)
+		}
+	}
+	return findings
 }
 
 func TestExternalTestsCountAsTests(t *testing.T) {
