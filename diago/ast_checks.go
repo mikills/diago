@@ -34,7 +34,9 @@ func newPackageSignals(pkg goListPackage) *packageSignals {
 }
 
 func analyzeExtraFile(findings *[]ASTFinding, signals *packageSignals, ctx astContext, file *ast.File) {
-	collectExportedSurface(signals, file)
+	if !ctx.generated && !ctx.isTest {
+		collectExportedSurface(signals, file)
+	}
 	collectDeadCodeSignals(signals, ctx, file)
 	collectLiteralSignals(signals, ctx, file)
 	findExtraFunctionSignals(findings, ctx, file)
@@ -286,9 +288,30 @@ func appendErrorBranchFinding(findings *[]ASTFinding, ctx astContext, name strin
 		*findings = append(*findings, astFinding("empty-error-branch", "high", loc, name, "if err != nil branch is empty"))
 		return
 	}
-	if returnsErr && branchSwallowsError(stmt.Body) {
+	if returnsErr && branchSwallowsError(stmt.Body) && !hasRuleIgnoreDirective(ctx, stmt, "swallowed-error") {
 		*findings = append(*findings, astFinding("swallowed-error", "high", loc, name, "error branch returns without propagating err"))
 	}
+}
+
+func hasRuleIgnoreDirective(ctx astContext, node ast.Node, rule string) bool {
+	if ctx.file == nil {
+		return false
+	}
+	line := ctx.fset.Position(node.Pos()).Line
+	for _, group := range ctx.file.Comments {
+		commentLine := ctx.fset.Position(group.Pos()).Line
+		if commentLine != line && ctx.fset.Position(group.End()).Line != line-1 {
+			continue
+		}
+		for _, comment := range group.List {
+			text := stripCommentDelims(comment.Text)
+			directive := diagoIgnoreDirective + " " + rule
+			if text == directive || strings.HasPrefix(text, directive+" ") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func findRecoverMisuse(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl, name string) {
@@ -330,92 +353,6 @@ func findContextAndTimeoutSignals(findings *[]ASTFinding, ctx astContext, fn *as
 		}
 		return true
 	})
-}
-
-func findResourceCloseSignals(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl, name string) {
-	resources, resolved := collectResourceCloseSignals(ctx, fn)
-	for nameVar, loc := range resources {
-		if !resolved[nameVar] {
-			msg := fmt.Sprintf("%s is opened/created but Close is not called in the function", nameVar)
-			*findings = append(*findings, astFinding("resource-not-closed", "high", loc, name, msg))
-		}
-	}
-}
-
-// collectResourceCloseSignals returns opened resources and the set whose
-// ownership is resolved: Close is called, or they escape via a return.
-func collectResourceCloseSignals(ctx astContext, fn *ast.FuncDecl) (map[string]astLocation, map[string]bool) {
-	resources := map[string]astLocation{}
-	resolved := map[string]bool{}
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.AssignStmt:
-			collectClosableAssignments(ctx, node, resources)
-		case *ast.CallExpr:
-			markClosedResource(node, resolved)
-		case *ast.ReturnStmt:
-			markReturnedResources(node, resolved)
-		}
-		return true
-	})
-	return resources, resolved
-}
-
-func collectClosableAssignments(ctx astContext, stmt *ast.AssignStmt, resources map[string]astLocation) {
-	for i, rhs := range stmt.Rhs {
-		if i >= len(stmt.Lhs) || !callCreatesClosable(rhs) {
-			continue
-		}
-		if id, ok := stmt.Lhs[i].(*ast.Ident); ok && id.Name != "_" {
-			resources[id.Name] = nodeLocation(ctx, stmt)
-		}
-	}
-}
-
-// markClosedResource resolves the root variable a Close call targets, so
-// resp.Body.Close() resolves resp.
-func markClosedResource(call *ast.CallExpr, resolved map[string]bool) {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "Close" {
-		return
-	}
-	if root := rootIdent(sel.X); root != "" {
-		resolved[root] = true
-	}
-}
-
-// markReturnedResources resolves resources returned to the caller, which then
-// owns the cleanup.
-func markReturnedResources(ret *ast.ReturnStmt, resolved map[string]bool) {
-	for _, result := range ret.Results {
-		ast.Inspect(result, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok {
-				resolved[id.Name] = true
-			}
-			return true
-		})
-	}
-}
-
-// rootIdent returns the leftmost identifier name in a selector/index/deref
-// chain, or "" if there is none.
-func rootIdent(expr ast.Expr) string {
-	for {
-		switch e := expr.(type) {
-		case *ast.Ident:
-			return e.Name
-		case *ast.SelectorExpr:
-			expr = e.X
-		case *ast.IndexExpr:
-			expr = e.X
-		case *ast.StarExpr:
-			expr = e.X
-		case *ast.ParenExpr:
-			expr = e.X
-		default:
-			return ""
-		}
-	}
 }
 
 func findMaintainabilitySignals(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl, name string) {
@@ -597,7 +534,7 @@ func shouldHaveContext(fn *ast.FuncDecl, name string) bool {
 		if !ok {
 			return true
 		}
-		if callCreatesClosable(call) || isLikelyIOCall(call) {
+		if isLikelyIOCall(call) {
 			foundIO = true
 		}
 		return true
@@ -638,23 +575,6 @@ func isHTTPClientLiteralWithoutTimeout(lit *ast.CompositeLit) bool {
 		}
 	}
 	return true
-}
-
-func callCreatesClosable(expr ast.Expr) bool {
-	call, ok := expr.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	if isSelectorCall(call, "os", "Open") || isSelectorCall(call, "http", "Get") || isSelectorCall(call, "http", "Post") {
-		return true
-	}
-	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		switch sel.Sel.Name {
-		case "Do", "Query", "QueryContext", "Open", "OpenFile":
-			return true
-		}
-	}
-	return false
 }
 
 func countElseIfChain(stmt *ast.IfStmt) int {

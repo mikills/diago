@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,9 +35,12 @@ type goListPackage struct {
 	ImportPath   string   `json:"ImportPath"`
 	Name         string   `json:"Name"`
 	Dir          string   `json:"Dir"`
+	Export       string   `json:"Export"`
 	GoFiles      []string `json:"GoFiles"`
 	TestGoFiles  []string `json:"TestGoFiles"`
 	XTestGoFiles []string `json:"XTestGoFiles"`
+	exports      map[string]string
+	ownedFields  map[string]map[string]bool
 }
 
 type packageStats struct {
@@ -49,6 +55,9 @@ type astContext struct {
 	isTest    bool
 	generated bool
 	fset      *token.FileSet
+	file      *ast.File
+	types     *types.Info
+	releases  map[string]map[int]bool
 }
 
 type astLocation struct {
@@ -63,9 +72,11 @@ func AnalyzeAST(workDir, target string) ([]ASTFinding, error) {
 	if err != nil {
 		return nil, err
 	}
+	ownedFields := collectLifecycleOwnedFields(pkgs)
 
 	var findings []ASTFinding
 	for _, pkg := range pkgs {
+		pkg.ownedFields = ownedFields
 		stats := analyzePackage(&findings, pkg)
 		appendLargePackageFinding(&findings, pkg.Dir, stats)
 	}
@@ -77,57 +88,111 @@ func analyzePackage(findings *[]ASTFinding, pkg goListPackage) packageStats {
 	signals := newPackageSignals(pkg)
 	files := append(append([]string{}, pkg.GoFiles...), pkg.TestGoFiles...)
 	files = append(files, pkg.XTestGoFiles...)
+	fset := token.NewFileSet()
+	parsedFiles := make(map[string]*ast.File, len(files))
 	for _, file := range files {
-		analyzePackageFile(findings, pkg, file, &stats, signals)
+		path := filepath.Join(pkg.Dir, file)
+		parsed, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			loc := astLocation{pkg: pkg.ImportPath, file: path}
+			*findings = append(*findings, astFinding("parse-error", "high", loc, "", err.Error()))
+			continue
+		}
+		parsedFiles[file] = parsed
+	}
+	typeInfo := checkPackageTypes(pkg, fset, parsedFiles)
+	releases := collectReleaseParams(parsedFiles, pkg.GoFiles)
+	params := analyzePackageFileParams{
+		pkg: pkg, fset: fset, typeInfo: typeInfo, releases: releases,
+		stats: &stats, signals: signals,
+	}
+	for _, file := range files {
+		if parsed := parsedFiles[file]; parsed != nil {
+			params.file = file
+			params.parsed = parsed
+			analyzePackageFile(findings, params)
+		}
 	}
 	appendPackageSignalFindings(findings, pkg, signals)
 	return stats
 }
 
-func analyzePackageFile(findings *[]ASTFinding, pkg goListPackage, file string, stats *packageStats, signals *packageSignals) {
-	path := filepath.Join(pkg.Dir, file)
-	fset := token.NewFileSet()
-	parsed, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
-	if err != nil {
-		loc := astLocation{pkg: pkg.ImportPath, file: path}
-		*findings = append(*findings, astFinding("parse-error", "high", loc, "", err.Error()))
-		return
-	}
+type analyzePackageFileParams struct {
+	pkg      goListPackage
+	file     string
+	parsed   *ast.File
+	fset     *token.FileSet
+	typeInfo *types.Info
+	releases map[string]map[int]bool
+	stats    *packageStats
+	signals  *packageSignals
+}
 
+func analyzePackageFile(findings *[]ASTFinding, params analyzePackageFileParams) {
+	path := filepath.Join(params.pkg.Dir, params.file)
 	// A //diago:ignore file is excluded entirely: no findings, signals, or stats.
-	if isIgnoredFile(parsed) {
+	if isIgnoredFile(params.parsed) {
 		return
 	}
 
-	generated := isGeneratedFile(path, parsed)
+	generated := isGeneratedFile(path, params.parsed)
 	lineCount := fileLineCount(path)
-	isTest := strings.HasSuffix(file, "_test.go")
+	isTest := strings.HasSuffix(params.file, "_test.go")
+	ctx := astContext{
+		pkg: params.pkg, path: path, isTest: isTest, generated: generated,
+		fset: params.fset, file: params.parsed, types: params.typeInfo, releases: params.releases,
+	}
 	// large-package weighs production code only, so tests don't inflate the count.
 	if !isTest {
-		stats.files++
+		params.stats.files++
 	}
-	appendLargeFileFinding(findings, pkg.ImportPath, path, lineCount, generated, isTest)
-	findCommentDebt(findings, pkg.ImportPath, path, fset, parsed)
+	appendLargeFileFinding(findings, ctx, lineCount)
+	findCommentDebt(findings, params.pkg.ImportPath, path, params.fset, params.parsed)
 
-	ctx := astContext{pkg: pkg, path: path, isTest: isTest, generated: generated, fset: fset}
-	analyzeExtraFile(findings, signals, ctx, parsed)
-	for _, decl := range parsed.Decls {
+	analyzeExtraFile(findings, params.signals, ctx, params.parsed)
+	for _, decl := range params.parsed.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
 		}
 		if !isTest {
-			stats.funcs++
+			params.stats.funcs++
 		}
 		analyzeFunc(findings, ctx, fn)
 	}
 }
 
-func appendLargeFileFinding(findings *[]ASTFinding, pkg, path string, lineCount int, generated, isTest bool) {
-	if generated || isTest || lineCount <= 1000 {
+func checkPackageTypes(pkg goListPackage, fset *token.FileSet, parsed map[string]*ast.File) *types.Info {
+	files := make([]*ast.File, 0, len(pkg.GoFiles))
+	for _, name := range pkg.GoFiles {
+		if file := parsed[name]; file != nil {
+			files = append(files, file)
+		}
+	}
+	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
+	if len(files) == 0 {
+		return info
+	}
+	lookup := func(path string) (io.ReadCloser, error) {
+		export := pkg.exports[path]
+		if export == "" {
+			return nil, fmt.Errorf("no export data for %s", path)
+		}
+		return os.Open(export)
+	}
+	conf := types.Config{
+		Importer: importer.ForCompiler(fset, "gc", lookup),
+		Error:    func(error) {},
+	}
+	_, _ = conf.Check(pkg.ImportPath, fset, files, info)
+	return info
+}
+
+func appendLargeFileFinding(findings *[]ASTFinding, ctx astContext, lineCount int) {
+	if ctx.generated || ctx.isTest || lineCount <= 1000 {
 		return
 	}
-	loc := astLocation{pkg: pkg, file: path, line: 1}
+	loc := astLocation{pkg: ctx.pkg.ImportPath, file: ctx.path, line: 1}
 	msg := fmt.Sprintf("file has %d lines", lineCount)
 	*findings = append(*findings, astFinding("large-file", severity(lineCount, 500, 1000, 1500), loc, "", msg))
 }
@@ -338,7 +403,33 @@ func listPackages(workDir, target string) ([]goListPackage, error) {
 		}
 		pkgs = append(pkgs, pkg)
 	}
+	exports := listExportFiles(workDir, target)
+	for i := range pkgs {
+		pkgs[i].exports = exports
+	}
 	return pkgs, nil
+}
+
+func listExportFiles(workDir, target string) map[string]string {
+	cmd := exec.Command("go", "list", "-e", "-deps", "-export", "-json", target)
+	cmd.Dir = workDir
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(out.Bytes()))
+	exports := make(map[string]string)
+	for dec.More() {
+		var pkg goListPackage
+		if err := dec.Decode(&pkg); err != nil {
+			return nil
+		}
+		if pkg.Export != "" {
+			exports[pkg.ImportPath] = pkg.Export
+		}
+	}
+	return exports
 }
 
 func analyzeFunc(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl) {
@@ -398,7 +489,8 @@ func findDangerousCalls(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl
 		if !ok {
 			return true
 		}
-		if isPanicCall(call) {
+		mustPanic := isMustConstructor(fn) && nodeContainsWithoutNestedFunc(fn.Body, call)
+		if isPanicCall(call) && !mustPanic && !isRepanicAfterRecover(fn.Body, call) {
 			loc := astLocation{pkg: ctx.pkg.ImportPath, file: ctx.path, line: ctx.fset.Position(call.Pos()).Line}
 			*findings = append(*findings, astFinding("panic-outside-main", "high", loc, name, "panic used outside main/test code"))
 		}
@@ -408,6 +500,107 @@ func findDangerousCalls(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl
 		}
 		return true
 	})
+}
+
+func isMustConstructor(fn *ast.FuncDecl) bool {
+	name := fn.Name.Name
+	if !strings.HasPrefix(name, "Must") || len(name) == len("Must") || fieldCount(fn.Type.Results) == 0 || returnsError(fn) {
+		return false
+	}
+	next := name[len("Must")]
+	return next >= 'A' && next <= 'Z'
+}
+
+func isRepanicAfterRecover(body *ast.BlockStmt, panicCall *ast.CallExpr) bool {
+	if len(panicCall.Args) != 1 {
+		return false
+	}
+	panicArg, ok := panicCall.Args[0].(*ast.Ident)
+	if !ok {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		deferStmt, ok := n.(*ast.DeferStmt)
+		if !ok {
+			return true
+		}
+		lit, ok := deferStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || !nodeContainsWithoutNestedFunc(lit.Body, panicCall) {
+			return true
+		}
+		found = blockHasRepanic(lit.Body, panicCall, panicArg.Name)
+		return !found
+	})
+	return found
+}
+
+func blockHasRepanic(block *ast.BlockStmt, panicCall *ast.CallExpr, name string) bool {
+	recovered := false
+	for _, stmt := range block.List {
+		if !nodeContainsWithoutNestedFunc(stmt, panicCall) {
+			if isRecoverAssignment(stmt, name) {
+				recovered = true
+			}
+			continue
+		}
+		if recovered {
+			return true
+		}
+		if statementInitializesRecover(stmt, name) {
+			return true
+		}
+		return nestedBlockHasRepanic(stmt, panicCall, name)
+	}
+	return false
+}
+
+func statementInitializesRecover(stmt ast.Stmt, name string) bool {
+	ifStmt, ok := stmt.(*ast.IfStmt)
+	return ok && isRecoverAssignment(ifStmt.Init, name)
+}
+
+func nestedBlockHasRepanic(stmt ast.Stmt, panicCall *ast.CallExpr, name string) bool {
+	found := false
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		if n == nil || found {
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		nested, ok := n.(*ast.BlockStmt)
+		if !ok || !nodeContainsWithoutNestedFunc(nested, panicCall) {
+			return true
+		}
+		found = blockHasRepanic(nested, panicCall, name)
+		return false
+	})
+	return found
+}
+
+func isRecoverAssignment(stmt ast.Stmt, name string) bool {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !isIdentName(assign.Lhs[0], name) {
+		return false
+	}
+	call, ok := assign.Rhs[0].(*ast.CallExpr)
+	return ok && isIdentCall(call, "recover")
+}
+
+func nodeContainsWithoutNestedFunc(root, target ast.Node) bool {
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if n == target {
+			found = true
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		return !found
+	})
+	return found
 }
 
 func isPanicCall(call *ast.CallExpr) bool {

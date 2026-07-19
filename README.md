@@ -41,6 +41,8 @@ Generated files are skipped across all checks — AST, `-modernize`, `-u1000`, a
 
 To skip any other file, add a `//diago:ignore` directive in its header (above the `package` clause), optionally with a reason: `//diago:ignore vendored upstream copy`. Ignored files are always skipped, even with `-include-generated`.
 
+An intentionally swallowed error can be suppressed at that branch with a rule-scoped directive on the same or preceding line, preferably with a reason: `//diago:ignore swallowed-error optional lookup failure`. Other swallowed errors remain reported.
+
 Opt into extra checks:
 ```sh
 diago -target ./... -coverage -deps -modernize

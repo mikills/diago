@@ -306,7 +306,21 @@ func runCoverage(workDir, target string) (*CoverageReport, AuditCheck) {
 	defer os.RemoveAll(tmpDir)
 
 	profile := filepath.Join(tmpDir, "coverage.out")
-	check := runAuditCommand(workDir, "coverage", "go", "test", "-coverprofile", profile, target)
+	targets, listCheck := coverageTargets(workDir, target)
+	if !listCheck.Passed {
+		return nil, listCheck
+	}
+	if len(targets) == 0 {
+		return &CoverageReport{}, AuditCheck{
+			Name:    "coverage",
+			Command: "go test -coverprofile coverage.out " + target,
+			Passed:  true,
+			Output:  "no packages with tests; coverage skipped\n",
+		}
+	}
+	args := []string{"go", "test", "-coverprofile", profile}
+	args = append(args, targets...)
+	check := runAuditCommand(workDir, "coverage", args...)
 	if !check.Passed {
 		return nil, check
 	}
@@ -325,6 +339,29 @@ func runCoverage(workDir, target string) (*CoverageReport, AuditCheck) {
 	}
 
 	return parseCoverageFunc(out.String()), check
+}
+
+func coverageTargets(workDir, target string) ([]string, AuditCheck) {
+	cmd := exec.Command("go", "list", "-json", target)
+	cmd.Dir = workDir
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return nil, AuditCheck{Name: "coverage", Command: "go list -json " + target, Passed: false, Output: out.String()}
+	}
+	dec := json.NewDecoder(bytes.NewReader(out.Bytes()))
+	var targets []string
+	for dec.More() {
+		var pkg goListPackage
+		if err := dec.Decode(&pkg); err != nil {
+			return nil, AuditCheck{Name: "coverage", Command: "go list -json " + target, Passed: false, Output: err.Error()}
+		}
+		if len(pkg.TestGoFiles)+len(pkg.XTestGoFiles) > 0 {
+			targets = append(targets, pkg.ImportPath)
+		}
+	}
+	return targets, AuditCheck{Passed: true}
 }
 
 func parseCoverageFunc(text string) *CoverageReport {
