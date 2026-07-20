@@ -58,6 +58,7 @@ type astContext struct {
 	file      *ast.File
 	types     *types.Info
 	releases  map[string]map[int]bool
+	cancelers map[string]map[int]bool
 }
 
 type astLocation struct {
@@ -102,8 +103,9 @@ func analyzePackage(findings *[]ASTFinding, pkg goListPackage) packageStats {
 	}
 	typeInfo := checkPackageTypes(pkg, fset, parsedFiles)
 	releases := collectReleaseParams(parsedFiles, pkg.GoFiles)
+	cancelers := collectCancelParams(pkg.ImportPath, parsedFiles, pkg.GoFiles, typeInfo)
 	params := analyzePackageFileParams{
-		pkg: pkg, fset: fset, typeInfo: typeInfo, releases: releases,
+		pkg: pkg, fset: fset, typeInfo: typeInfo, releases: releases, cancelers: cancelers,
 		stats: &stats, signals: signals,
 	}
 	for _, file := range files {
@@ -118,14 +120,15 @@ func analyzePackage(findings *[]ASTFinding, pkg goListPackage) packageStats {
 }
 
 type analyzePackageFileParams struct {
-	pkg      goListPackage
-	file     string
-	parsed   *ast.File
-	fset     *token.FileSet
-	typeInfo *types.Info
-	releases map[string]map[int]bool
-	stats    *packageStats
-	signals  *packageSignals
+	pkg       goListPackage
+	file      string
+	parsed    *ast.File
+	fset      *token.FileSet
+	typeInfo  *types.Info
+	releases  map[string]map[int]bool
+	cancelers map[string]map[int]bool
+	stats     *packageStats
+	signals   *packageSignals
 }
 
 func analyzePackageFile(findings *[]ASTFinding, params analyzePackageFileParams) {
@@ -141,9 +144,10 @@ func analyzePackageFile(findings *[]ASTFinding, params analyzePackageFileParams)
 	ctx := astContext{
 		pkg: params.pkg, path: path, isTest: isTest, generated: generated,
 		fset: params.fset, file: params.parsed, types: params.typeInfo, releases: params.releases,
+		cancelers: params.cancelers,
 	}
 	// large-package weighs production code only, so tests don't inflate the count.
-	if !isTest {
+	if !isTest && !generated {
 		params.stats.files++
 	}
 	appendLargeFileFinding(findings, ctx, lineCount)
@@ -155,7 +159,7 @@ func analyzePackageFile(findings *[]ASTFinding, params analyzePackageFileParams)
 		if !ok || fn.Body == nil {
 			continue
 		}
-		if !isTest {
+		if !isTest && !generated {
 			params.stats.funcs++
 		}
 		analyzeFunc(findings, ctx, fn)
@@ -169,7 +173,12 @@ func checkPackageTypes(pkg goListPackage, fset *token.FileSet, parsed map[string
 			files = append(files, file)
 		}
 	}
-	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
+	info := &types.Info{
+		Types:      make(map[ast.Expr]types.TypeAndValue),
+		Defs:       make(map[*ast.Ident]types.Object),
+		Uses:       make(map[*ast.Ident]types.Object),
+		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+	}
 	if len(files) == 0 {
 		return info
 	}
