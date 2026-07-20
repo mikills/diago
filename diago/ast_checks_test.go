@@ -51,11 +51,11 @@ func run() { _ = save() }
 func ignoredCallFindings(t *testing.T, source string) []ASTFinding {
 	t.Helper()
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "sample.go", source, 0)
+	file, err := parser.ParseFile(fset, "sample.go", source, parser.ParseComments)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := astContext{fset: fset, path: "sample.go"}
+	ctx := astContext{fset: fset, path: "sample.go", file: file}
 	var findings []ASTFinding
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -65,6 +65,33 @@ func ignoredCallFindings(t *testing.T, source string) []ASTFinding {
 		findErrorHandlingSignals(&findings, ctx, fn, fn.Name.Name)
 	}
 	return findings
+}
+
+func TestIgnoredCallRequiresExactAdjacentRuleDirective(t *testing.T) {
+	findings := ignoredCallFindings(t, `package sample
+func save() error { return nil }
+func unsuppressed() { _ = save() }
+func suppressed() {
+	//diago:ignore ignored-call-result shutdown is best effort
+	_ = save()
+}
+func wrongRule() {
+	//diago:ignore background-context wrong rule
+	_ = save()
+}
+func detached() {
+	//diago:ignore ignored-call-result not adjacent
+
+	_ = save()
+}
+func earlierInGroup() {
+	//diago:ignore ignored-call-result not the adjacent comment
+	// This explanation is adjacent, but it is not a directive.
+	_ = save()
+}`)
+	if len(findings) != 4 {
+		t.Fatalf("got %d ignored-call-result findings, want 4: %+v", len(findings), findings)
+	}
 }
 
 func TestCollectLiteralSignals(t *testing.T) {

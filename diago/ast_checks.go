@@ -266,7 +266,7 @@ func appendIgnoredCallFinding(findings *[]ASTFinding, ctx astContext, name strin
 		return
 	}
 	call, ok := stmt.Rhs[0].(*ast.CallExpr)
-	if !ok {
+	if !ok || hasRuleIgnoreDirective(ctx, stmt, "ignored-call-result") {
 		return
 	}
 	severity := "medium"
@@ -299,11 +299,11 @@ func hasRuleIgnoreDirective(ctx astContext, node ast.Node, rule string) bool {
 	}
 	line := ctx.fset.Position(node.Pos()).Line
 	for _, group := range ctx.file.Comments {
-		commentLine := ctx.fset.Position(group.Pos()).Line
-		if commentLine != line && ctx.fset.Position(group.End()).Line != line-1 {
-			continue
-		}
 		for _, comment := range group.List {
+			commentLine := ctx.fset.Position(comment.Pos()).Line
+			if commentLine != line && ctx.fset.Position(comment.End()).Line != line-1 {
+				continue
+			}
 			text := stripCommentDelims(comment.Text)
 			directive := diagoIgnoreDirective + " " + rule
 			if text == directive || strings.HasPrefix(text, directive+" ") {
@@ -336,19 +336,16 @@ func findRecoverCalls(findings *[]ASTFinding, ctx astContext, name string, n ast
 }
 
 func findContextAndTimeoutSignals(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl, name string) {
-	if shouldHaveContext(fn, name) && !hasContextParam(fn) {
+	if shouldHaveContext(ctx, fn) && !hasContextParam(ctx, fn) {
 		loc := nodeLocation(ctx, fn)
-		*findings = append(*findings, astFinding("missing-context-param", "medium", loc, name, "service/exported function appears to perform I/O without context.Context parameter"))
+		*findings = append(*findings, astFinding("missing-context-param", "medium", loc, name, "exported function performs cancellable work without a context.Context parameter"))
 	}
+	findBackgroundContextSignals(findings, ctx, fn, name)
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.CompositeLit:
 			if isHTTPClientLiteralWithoutTimeout(x) {
 				*findings = append(*findings, astFinding("http-client-without-timeout", "high", nodeLocation(ctx, x), name, "http.Client literal has no Timeout"))
-			}
-		case *ast.CallExpr:
-			if isSelectorCall(x, "context", "Background") || isSelectorCall(x, "context", "TODO") {
-				*findings = append(*findings, astFinding("background-context", "medium", nodeLocation(ctx, x), name, "context.Background/TODO used inside function"))
 			}
 		}
 		return true
@@ -516,48 +513,17 @@ func isIdentCall(call *ast.CallExpr, name string) bool {
 	return ok && ident.Name == name
 }
 
-func isSelectorCall(call *ast.CallExpr, recv, method string) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != method {
-		return false
-	}
-	return isIdentName(sel.X, recv)
-}
-
-func shouldHaveContext(fn *ast.FuncDecl, name string) bool {
-	if !ast.IsExported(fn.Name.Name) && !strings.Contains(name, "Service") && !strings.Contains(name, "Store") && !strings.Contains(name, "Client") {
-		return false
-	}
-	foundIO := false
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if isLikelyIOCall(call) {
-			foundIO = true
-		}
-		return true
-	})
-	return foundIO
-}
-
-func hasContextParam(fn *ast.FuncDecl) bool {
+func hasContextParam(ctx astContext, fn *ast.FuncDecl) bool {
 	if fn.Type.Params == nil {
 		return false
 	}
 	for _, p := range fn.Type.Params.List {
-		if selector, ok := p.Type.(*ast.SelectorExpr); ok && selector.Sel.Name == "Context" && isIdentName(selector.X, "context") {
-			return true
+		if ctx.types != nil {
+			if typeAndValue, ok := ctx.types.Types[p.Type]; ok && typeAndValue.Type != nil && isContextType(typeAndValue.Type) {
+				return true
+			}
 		}
-	}
-	return false
-}
-
-func isLikelyIOCall(call *ast.CallExpr) bool {
-	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		switch sel.Sel.Name {
-		case "Do", "Get", "Post", "Query", "QueryRow", "Exec", "Begin", "Open", "ListenAndServe":
+		if selector, ok := p.Type.(*ast.SelectorExpr); ok && selector.Sel.Name == "Context" && isIdentName(selector.X, contextPackagePath) {
 			return true
 		}
 	}
