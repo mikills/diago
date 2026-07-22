@@ -49,6 +49,11 @@ type packageStats struct {
 	funcs      int
 }
 
+const (
+	largePackageFileLimit = 50
+	largePackageFuncLimit = 1000
+)
+
 type astContext struct {
 	pkg       goListPackage
 	path      string
@@ -385,7 +390,7 @@ func filterSkippedFindings(findings []ASTFinding, workDir string, includeGenerat
 func appendLargePackageFinding(findings *[]ASTFinding, dir string, stats packageStats) {
 	// Total lines are covered by large-file (1k per file) plus the file count, so
 	// the package only weighs file and function counts here.
-	if stats.files <= 50 && stats.funcs <= 500 {
+	if stats.files <= largePackageFileLimit && stats.funcs <= largePackageFuncLimit {
 		return
 	}
 	loc := astLocation{pkg: stats.importPath, file: dir, line: 1}

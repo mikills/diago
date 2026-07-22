@@ -184,6 +184,58 @@ func TestABCDEFGHIJKLMNOPQRSTUVWXY123456(t *testing.T) {}
 	})
 }
 
+func TestLargePackageFinding(t *testing.T) {
+	tests := []struct {
+		name        string
+		files       int
+		funcs       int
+		wantFinding bool
+		wantMessage string
+	}{
+		{name: "limits are allowed", files: 50, funcs: 1000},
+		{
+			name:        "file count above limit is reported",
+			files:       51,
+			funcs:       100,
+			wantFinding: true,
+			wantMessage: "package has 51 files and 100 funcs",
+		},
+		{
+			name:        "function count above limit is reported",
+			files:       10,
+			funcs:       1001,
+			wantFinding: true,
+			wantMessage: "package has 10 files and 1001 funcs",
+		},
+		{name: "values below limits are allowed", files: 10, funcs: 100},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var findings []ASTFinding
+			appendLargePackageFinding(&findings, "/repo/sample", packageStats{
+				importPath: "example.com/sample",
+				files:      tc.files,
+				funcs:      tc.funcs,
+			})
+
+			if !tc.wantFinding {
+				if len(findings) != 0 {
+					t.Fatalf("got unexpected findings: %+v", findings)
+				}
+				return
+			}
+			if len(findings) != 1 {
+				t.Fatalf("got %d findings, want 1: %+v", len(findings), findings)
+			}
+			finding := findings[0]
+			if finding.Rule != "large-package" || finding.Severity != "medium" || finding.Message != tc.wantMessage {
+				t.Fatalf("unexpected finding: %+v", finding)
+			}
+		})
+	}
+}
+
 func longTestNameFindings(t *testing.T, source string) []ASTFinding {
 	t.Helper()
 	fset := token.NewFileSet()
