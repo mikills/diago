@@ -41,6 +41,9 @@ type AuditConfig struct {
 // AuditReport contains diagnostics from Go toolchain-only checks.
 type AuditReport struct {
 	Target          string           `json:"target"`
+	TargetGoVersion string           `json:"target_go_version,omitempty"`
+	TargetToolchain string           `json:"target_toolchain,omitempty"`
+	GoToolVersion   string           `json:"go_tool_version,omitempty"`
 	OverallPass     bool             `json:"overall_pass"`
 	Checks          []AuditCheck     `json:"checks"`
 	Summary         AuditSummary     `json:"summary"`
@@ -48,6 +51,7 @@ type AuditReport struct {
 	Coverage        *CoverageReport  `json:"coverage,omitempty"`
 	Dependencies    []string         `json:"dependencies,omitempty"`
 	ASTFindings     []ASTFinding     `json:"ast_findings,omitempty"`
+	Rules           []RuleDescriptor `json:"rules,omitempty"`
 	// Baseline-diff metadata, set only when a baseline was applied.
 	BaselineApplied  bool `json:"baseline_applied,omitempty"`
 	NewFindings      int  `json:"new_findings,omitempty"`
@@ -69,10 +73,11 @@ type AuditSummary struct {
 
 // AuditCheck is the result of one command-backed diagnostic.
 type AuditCheck struct {
-	Name    string `json:"name"`
-	Command string `json:"command"`
-	Passed  bool   `json:"passed"`
-	Output  string `json:"output"`
+	Name        string `json:"name"`
+	Command     string `json:"command"`
+	ToolVersion string `json:"tool_version,omitempty"`
+	Passed      bool   `json:"passed"`
+	Output      string `json:"output"`
 }
 
 // CoverageReport summarizes go test coverage output.
@@ -111,11 +116,19 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 		return nil, err
 	}
 
-	report := &AuditReport{Target: cfg.TargetPath, OverallPass: true}
+	targetGoVersion, targetToolchain, err := moduleGoVersion(workDir)
+	if err != nil {
+		return nil, err
+	}
+	report := &AuditReport{
+		Target: cfg.TargetPath, TargetGoVersion: targetGoVersion, TargetToolchain: targetToolchain,
+		GoToolVersion: goToolVersion(workDir), OverallPass: true, Rules: supportedRuleDescriptors(targetGoVersion),
+	}
 
 	report.addCheck(runAuditCommand(workDir, "test", "go", "test", targetPath))
 	report.addCheck(runAuditCommand(workDir, "vet", "go", "vet", targetPath))
-	runOptionalAuditChecks(report, cfg, workDir, targetPath)
+	runOptionalAuditChecks(report, cfg, workDir, targetPath, targetGoVersion)
+	report.Rules = mergeRuleDescriptors(report.Rules, report.ASTFindings, targetGoVersion)
 
 	// Paths are made relative to the module so a committed baseline matches
 	// across machines and CI checkouts and no local home directory leaks in.
@@ -137,6 +150,26 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 		return nil, fmt.Errorf("writing audit report: %w", err)
 	}
 	return report, nil
+}
+
+func mergeRuleDescriptors(existing []RuleDescriptor, findings []ASTFinding, targetGoVersion string) []RuleDescriptor {
+	byID := make(map[string]RuleDescriptor, len(existing))
+	for _, descriptor := range existing {
+		byID[descriptor.ID] = descriptor
+	}
+	for _, finding := range findings {
+		descriptor, ok := descriptorForRule(finding.Rule)
+		if !ok || !ruleSupportedByGoVersion(descriptor.ID, targetGoVersion) {
+			continue
+		}
+		byID[descriptor.ID] = descriptor
+	}
+	merged := make([]RuleDescriptor, 0, len(byID))
+	for _, descriptor := range byID {
+		merged = append(merged, descriptor)
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].ID < merged[j].ID })
+	return merged
 }
 
 func relativizeReport(report *AuditReport, workDir string) {
@@ -195,14 +228,14 @@ func sortFindings(findings []ASTFinding) {
 	})
 }
 
-func runOptionalAuditChecks(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+func runOptionalAuditChecks(report *AuditReport, cfg AuditConfig, workDir, targetPath, targetGoVersion string) {
 	if cfg.Race {
 		report.addCheck(runAuditCommand(workDir, "race", "go", "test", "-race", targetPath))
 	}
 	runCoverageAuditCheck(report, cfg, workDir, targetPath)
 	runDepsAuditCheck(report, cfg, workDir, targetPath)
 	runASTAuditCheck(report, cfg, workDir, targetPath)
-	runModernizeAuditCheck(report, cfg, workDir, targetPath)
+	runModernizeAuditCheck(report, cfg, workDir, targetPath, targetGoVersion)
 	runU1000AuditCheck(report, cfg, workDir, targetPath)
 	runInferTypeArgsAuditCheck(report, cfg, workDir, targetPath)
 	runDeadCodeFixCheck(report, cfg, workDir, targetPath)
@@ -235,14 +268,35 @@ func runASTAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath 
 	report.ASTFindings = findings
 }
 
-func runModernizeAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+func runModernizeAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath, targetGoVersion string) {
 	if !cfg.Modernize && !cfg.ModernizeFix {
 		return
 	}
 	findings, check := runModernizeAudit(workDir, targetPath, cfg.ModernizeFix)
 	report.addCheck(check)
+	findings = filterUnsupportedFindings(findings, targetGoVersion)
 	findings = filterSkippedFindings(findings, workDir, cfg.IncludeGenerated)
 	report.ASTFindings = append(report.ASTFindings, findings...)
+}
+
+func filterUnsupportedFindings(findings []ASTFinding, targetGoVersion string) []ASTFinding {
+	kept := findings[:0]
+	for _, finding := range findings {
+		if ruleSupportedByGoVersion(finding.Rule, targetGoVersion) {
+			kept = append(kept, finding)
+		}
+	}
+	return kept
+}
+
+func goToolVersion(workDir string) string {
+	cmd := exec.Command("go", "version")
+	cmd.Dir = workDir
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func runU1000AuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
@@ -581,6 +635,8 @@ func AuditRuleOrder() []string {
 		"background-context",
 		"http-client-without-timeout",
 		"resource-not-closed",
+		"sql-rows-err",
+		"scanner-err",
 		"untested-exported-surface",
 		"duplicate-string-literal",
 		"magic-number",

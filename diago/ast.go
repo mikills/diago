@@ -336,6 +336,9 @@ func headerMarkers(path string) (generated, ignored bool) {
 		}
 		inBlock = nextBlockState(inBlock, line)
 	}
+	if scanner.Err() != nil {
+		return generated, false
+	}
 	return generated, ignored
 }
 
