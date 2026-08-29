@@ -129,6 +129,9 @@ func sourceLine(path string, line int) string {
 		}
 		current++
 	}
+	if scanner.Err() != nil {
+		return ""
+	}
 	return ""
 }
 
@@ -388,6 +391,9 @@ func trimPProfList(text string, maxLines int) string {
 			out = append(out, "... truncated after "+strconv.Itoa(maxLines)+" lines")
 			break
 		}
+	}
+	if scanner.Err() != nil {
+		return strings.Join(out, "\n")
 	}
 	return strings.Join(out, "\n")
 }

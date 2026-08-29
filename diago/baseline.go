@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // applyBaseline keeps only AST findings absent from the baseline report so the
@@ -49,7 +50,17 @@ func applyBaseline(report *AuditReport, baselinePath string) error {
 // astFindingKey excludes Line so a line-shifting edit elsewhere does not
 // resurface a known finding.
 func astFindingKey(f ASTFinding) string {
-	return f.Rule + "\x00" + f.File + "\x00" + f.Symbol + "\x00" + f.Message
+	return baselineRuleKey(f.Rule) + "\x00" + f.File + "\x00" + f.Symbol + "\x00" + f.Message
+}
+
+// baselineRuleKey preserves existing baselines made before gopls modernizer
+// categories became individual rule IDs. The category remains part of Symbol,
+// so modernizers are still independently tracked.
+func baselineRuleKey(rule string) string {
+	if strings.HasPrefix(rule, "modernize/") {
+		return "modernize"
+	}
+	return rule
 }
 
 func recomputeAuditPass(report *AuditReport) {

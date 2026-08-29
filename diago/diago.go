@@ -563,13 +563,18 @@ func hasBenchmarks(workDir, target, filter string) (bool, error) {
 	}
 
 	scanner := bufio.NewScanner(&out)
+	found := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, "Benchmark") {
-			return true, nil
+			found = true
+			break
 		}
 	}
-	return false, nil
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("scanning benchmark list: %w", err)
+	}
+	return found, nil
 }
 
 func runBenchmarks(workDir, target, filter string, extraArgs []string) (string, error) {
@@ -641,6 +646,9 @@ func ParsePProfText(text string, threshold float64) []Finding {
 		}
 
 		findings = append(findings, f)
+	}
+	if scanner.Err() != nil {
+		return findings
 	}
 
 	return findings
@@ -726,6 +734,9 @@ func ParseEscapeOutput(text string) []EscapeFinding {
 			Line:   lineNum,
 			Detail: detail,
 		})
+	}
+	if scanner.Err() != nil {
+		return findings
 	}
 
 	return findings
