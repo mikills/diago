@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+
+	"golang.org/x/tools/go/analysis"
 )
 
 type iteratorErrorRule struct {
@@ -31,57 +33,102 @@ type iteratorLoop struct {
 	loop *ast.ForStmt
 }
 
+// IteratorErrorAnalyzer reports unchecked terminal errors after standard
+// library iterator loops. Its diagnostic categories remain Diago's stable
+// sql-rows-err and scanner-err rule IDs.
+var IteratorErrorAnalyzer = &analysis.Analyzer{
+	Name: "diagoiterators",
+	Doc:  "report unchecked terminal iterator errors",
+	Run:  runIteratorErrorAnalyzer,
+}
+
+func runIteratorErrorAnalyzer(pass *analysis.Pass) (any, error) {
+	for _, file := range pass.Files {
+		path := pass.Fset.PositionFor(file.Pos(), false).Filename
+		if isIgnoredFile(file) || isGeneratedFile(path, file) {
+			continue
+		}
+		ctx := astContext{path: path, fset: pass.Fset, file: file, types: pass.TypesInfo}
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			findIteratorErrorIssues(ctx, fn, func(loop iteratorLoop) {
+				pass.Report(analysis.Diagnostic{
+					Pos:      loop.loop.Pos(),
+					End:      loop.loop.End(),
+					Category: loop.rule.rule,
+					Message:  iteratorErrorMessage(loop.rule),
+				})
+			})
+		}
+	}
+	return nil, nil
+}
+
 // findIteratorErrorSignals checks direct iterator loops against later sibling
 // statements. It deliberately favors precision: aliases, helper calls, and
 // arbitrary control-flow proofs are not treated as terminal checks.
 func findIteratorErrorSignals(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl, name string) {
-	findIteratorErrorSignalsInBlock(findings, ctx, fn.Body.List, nil, name)
+	findIteratorErrorIssues(ctx, fn, func(loop iteratorLoop) {
+		*findings = append(*findings, astFinding(loop.rule.rule, "high", nodeLocation(ctx, loop.loop), name, iteratorErrorMessage(loop.rule)))
+	})
 }
 
-func findIteratorErrorSignalsInBlock(findings *[]ASTFinding, ctx astContext, statements, trailing []ast.Stmt, name string) {
+type iteratorErrorReporter func(iteratorLoop)
+
+func findIteratorErrorIssues(ctx astContext, fn *ast.FuncDecl, report iteratorErrorReporter) {
+	findIteratorErrorIssuesInBlock(ctx, fn.Body.List, nil, report)
+}
+
+func findIteratorErrorIssuesInBlock(ctx astContext, statements, trailing []ast.Stmt, report iteratorErrorReporter) {
 	for index, statement := range statements {
 		following := append(append([]ast.Stmt{}, statements[index+1:]...), trailing...)
 		if loop, ok := iteratorLoopForStatement(ctx, statement); ok && !hasRuleIgnoreDirective(ctx, loop.loop, loop.rule.rule) && !iteratorErrorChecked(ctx, following, loop) {
-			message := fmt.Sprintf("%s; call %s.Err() after the loop", loop.rule.message, iteratorReceiverName(loop.rule))
-			*findings = append(*findings, astFinding(loop.rule.rule, "high", nodeLocation(ctx, loop.loop), name, message))
+			report(loop)
 		}
-		findIteratorErrorSignalsInNestedStatement(findings, ctx, statement, following, name)
+		findIteratorErrorIssuesInNestedStatement(ctx, statement, following, report)
 	}
 }
 
-func findIteratorErrorSignalsInNestedStatement(findings *[]ASTFinding, ctx astContext, statement ast.Stmt, trailing []ast.Stmt, name string) {
+func findIteratorErrorIssuesInNestedStatement(ctx astContext, statement ast.Stmt, trailing []ast.Stmt, report iteratorErrorReporter) {
 	switch statement := statement.(type) {
 	case *ast.BlockStmt:
-		findIteratorErrorSignalsInBlock(findings, ctx, statement.List, trailing, name)
+		findIteratorErrorIssuesInBlock(ctx, statement.List, trailing, report)
 	case *ast.IfStmt:
-		findIteratorErrorSignalsInIf(findings, ctx, statement, trailing, name)
+		findIteratorErrorIssuesInIf(ctx, statement, trailing, report)
 	case *ast.SwitchStmt:
-		findIteratorErrorSignalsInCases(findings, ctx, statement.Body.List, trailing, name)
+		findIteratorErrorIssuesInCases(ctx, statement.Body.List, trailing, report)
 	case *ast.TypeSwitchStmt:
-		findIteratorErrorSignalsInCases(findings, ctx, statement.Body.List, trailing, name)
+		findIteratorErrorIssuesInCases(ctx, statement.Body.List, trailing, report)
 	case *ast.ForStmt:
-		findIteratorErrorSignalsInBlock(findings, ctx, statement.Body.List, trailing, name)
+		findIteratorErrorIssuesInBlock(ctx, statement.Body.List, trailing, report)
 	case *ast.RangeStmt:
-		findIteratorErrorSignalsInBlock(findings, ctx, statement.Body.List, trailing, name)
+		findIteratorErrorIssuesInBlock(ctx, statement.Body.List, trailing, report)
 	case *ast.LabeledStmt:
-		findIteratorErrorSignalsInNestedStatement(findings, ctx, statement.Stmt, trailing, name)
+		findIteratorErrorIssuesInNestedStatement(ctx, statement.Stmt, trailing, report)
 	}
 }
 
-func findIteratorErrorSignalsInIf(findings *[]ASTFinding, ctx astContext, statement *ast.IfStmt, trailing []ast.Stmt, name string) {
-	findIteratorErrorSignalsInBlock(findings, ctx, statement.Body.List, trailing, name)
+func findIteratorErrorIssuesInIf(ctx astContext, statement *ast.IfStmt, trailing []ast.Stmt, report iteratorErrorReporter) {
+	findIteratorErrorIssuesInBlock(ctx, statement.Body.List, trailing, report)
 	if statement.Else != nil {
-		findIteratorErrorSignalsInNestedStatement(findings, ctx, statement.Else, trailing, name)
+		findIteratorErrorIssuesInNestedStatement(ctx, statement.Else, trailing, report)
 	}
 }
 
-func findIteratorErrorSignalsInCases(findings *[]ASTFinding, ctx astContext, clauses []ast.Stmt, trailing []ast.Stmt, name string) {
+func findIteratorErrorIssuesInCases(ctx astContext, clauses []ast.Stmt, trailing []ast.Stmt, report iteratorErrorReporter) {
 	for _, clause := range clauses {
 		caseClause, ok := clause.(*ast.CaseClause)
 		if ok {
-			findIteratorErrorSignalsInBlock(findings, ctx, caseClause.Body, trailing, name)
+			findIteratorErrorIssuesInBlock(ctx, caseClause.Body, trailing, report)
 		}
 	}
+}
+
+func iteratorErrorMessage(rule iteratorErrorRule) string {
+	return fmt.Sprintf("%s; call %s.Err() after the loop", rule.message, iteratorReceiverName(rule))
 }
 
 func iteratorLoopForStatement(ctx astContext, statement ast.Stmt) (iteratorLoop, bool) {

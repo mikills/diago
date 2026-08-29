@@ -178,3 +178,14 @@ func TestModernizeBaselineKey(t *testing.T) {
 		t.Fatalf("legacy and current modernize findings must share a baseline key")
 	}
 }
+
+func TestLegacyU1000Baseline(t *testing.T) {
+	known := ASTFinding{Rule: "u1000", File: "sample.go", Symbol: "U1000", Message: "func unused is unused", Severity: "low"}
+	report := &AuditReport{Checks: []AuditCheck{{Name: "u1000", Passed: true}}, ASTFindings: []ASTFinding{known}}
+	if err := applyBaseline(report, writeBaseline(t, AuditReport{ASTFindings: []ASTFinding{known}})); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.ASTFindings) != 0 || report.NewFindings != 0 {
+		t.Fatalf("legacy U1000 finding must remain baselined: %+v", report)
+	}
+}

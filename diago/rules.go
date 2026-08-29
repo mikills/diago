@@ -76,6 +76,12 @@ func descriptorForRule(id string) (RuleDescriptor, bool) {
 	if descriptor, ok := ruleCatalog[id]; ok {
 		return descriptor, true
 	}
+	if rule, ok := curatedStaticcheckRule(id); ok {
+		return RuleDescriptor{
+			ID: id, Kind: "correctness", Source: "staticcheck", DefaultEnabled: false,
+			Severity: rule.Severity, FixSafety: FixSafetyNone, Summary: "Review this curated Staticcheck correctness diagnostic.",
+		}, true
+	}
 	category, ok := strings.CutPrefix(id, "modernize/")
 	if !ok || category == "" {
 		return RuleDescriptor{}, false
@@ -90,11 +96,15 @@ func descriptorForRule(id string) (RuleDescriptor, bool) {
 // module's declared language version. Unknown versions retain all entries so
 // callers do not silently lose metadata for legacy go.mod files.
 func supportedRuleDescriptors(goVersion string) []RuleDescriptor {
-	descriptors := make([]RuleDescriptor, 0, len(ruleCatalog))
+	descriptors := make([]RuleDescriptor, 0, len(ruleCatalog)+len(curatedStaticcheckProfile.Rules))
 	for _, descriptor := range ruleCatalog {
 		if descriptor.SinceGo != "" && goVersion != "" && !goVersionAtLeast(goVersion, descriptor.SinceGo) {
 			continue
 		}
+		descriptors = append(descriptors, descriptor)
+	}
+	for _, rule := range curatedStaticcheckProfile.Rules {
+		descriptor, _ := descriptorForRule(rule.Rule)
 		descriptors = append(descriptors, descriptor)
 	}
 	sort.Slice(descriptors, func(i, j int) bool { return descriptors[i].ID < descriptors[j].ID })

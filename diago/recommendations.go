@@ -65,7 +65,7 @@ func BuildRecommendations(findings []ASTFinding, limit int) []Recommendation {
 	groups := map[string][]ASTFinding{}
 	for _, finding := range findings {
 		rule := recommendationRule(finding.Rule)
-		if _, ok := recommendationTemplates[rule]; ok {
+		if _, ok := recommendationTemplateForRule(rule); ok {
 			groups[rule] = append(groups[rule], finding)
 		}
 	}
@@ -76,7 +76,7 @@ func BuildRecommendations(findings []ASTFinding, limit int) []Recommendation {
 		if len(items) == 0 {
 			continue
 		}
-		t := recommendationTemplates[rule]
+		t, _ := recommendationTemplateForRule(rule)
 		examples := items
 		if len(examples) > 3 {
 			examples = examples[:3]
@@ -102,13 +102,23 @@ func BuildRecommendations(findings []ASTFinding, limit int) []Recommendation {
 }
 
 func recommendationRule(rule string) string {
-	if _, ok := recommendationTemplates[rule]; ok {
+	if _, ok := recommendationTemplateForRule(rule); ok {
 		return rule
 	}
 	if strings.HasPrefix(rule, "modernize/") {
 		return "modernize"
 	}
 	return rule
+}
+
+func recommendationTemplateForRule(rule string) (recommendationTemplate, bool) {
+	if template, ok := recommendationTemplates[rule]; ok {
+		return template, true
+	}
+	if staticcheckRule, ok := curatedStaticcheckRule(rule); ok {
+		return recommendationTemplate{severity: staticcheckRule.Severity, confidence: "high", message: staticcheckRule.Recommendation}, true
+	}
+	return recommendationTemplate{}, false
 }
 
 func recommendationSymbols(findings []ASTFinding, limit int) []string {
