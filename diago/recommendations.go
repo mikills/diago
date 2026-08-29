@@ -82,11 +82,15 @@ func BuildRecommendations(findings []ASTFinding, limit int) []Recommendation {
 			examples = examples[:3]
 		}
 		symbols := recommendationSymbols(items, 8)
+		countLabel := "findings"
+		if len(items) == 1 {
+			countLabel = "finding"
+		}
 		out = append(out, Recommendation{
 			Rule:       rule,
 			Severity:   maxSeverity(t.severity, items),
 			Confidence: t.confidence,
-			Message:    fmt.Sprintf("%s (%d findings)", t.message, len(items)),
+			Message:    fmt.Sprintf("%s (%d %s)", t.message, len(items), countLabel),
 			Symbols:    symbols,
 			Examples:   examples,
 		})
