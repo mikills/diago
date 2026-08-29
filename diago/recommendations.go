@@ -1,6 +1,9 @@
 package diago
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Recommendation is deterministic advice derived from audit findings.
 type Recommendation struct {
@@ -35,6 +38,8 @@ var recommendationTemplates = map[string]recommendationTemplate{
 	"background-context":          {"medium", "medium", "Use caller-provided context instead of creating a root context inside library/service code."},
 	"http-client-without-timeout": {"high", "high", "Set http.Client.Timeout or use request contexts with deadlines."},
 	"resource-not-closed":         {"high", "medium", "Close opened resources, usually with defer immediately after the error check."},
+	"sql-rows-err":                {"high", "high", "Call rows.Err after iterating database/sql rows so deferred iteration errors are not lost."},
+	"scanner-err":                 {"high", "high", "Call scanner.Err after scanning so tokenization and I/O errors are not lost."},
 	"untested-exported-surface":   {"medium", "medium", "Add package tests for exported API or reduce exported surface area."},
 	"duplicate-string-literal":    {"low", "low", "Extract repeated semantic strings to constants. Ignore incidental test/log strings."},
 	"magic-number":                {"low", "low", "Name repeated numeric literals with constants when they carry domain meaning."},
@@ -59,8 +64,9 @@ func BuildRecommendations(findings []ASTFinding, limit int) []Recommendation {
 	}
 	groups := map[string][]ASTFinding{}
 	for _, finding := range findings {
-		if _, ok := recommendationTemplates[finding.Rule]; ok {
-			groups[finding.Rule] = append(groups[finding.Rule], finding)
+		rule := recommendationRule(finding.Rule)
+		if _, ok := recommendationTemplates[rule]; ok {
+			groups[rule] = append(groups[rule], finding)
 		}
 	}
 
@@ -89,6 +95,16 @@ func BuildRecommendations(findings []ASTFinding, limit int) []Recommendation {
 		}
 	}
 	return out
+}
+
+func recommendationRule(rule string) string {
+	if _, ok := recommendationTemplates[rule]; ok {
+		return rule
+	}
+	if strings.HasPrefix(rule, "modernize/") {
+		return "modernize"
+	}
+	return rule
 }
 
 func recommendationSymbols(findings []ASTFinding, limit int) []string {

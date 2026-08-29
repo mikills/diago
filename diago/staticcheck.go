@@ -18,8 +18,10 @@ type staticcheckDiagnostic struct {
 	Message string `json:"message"`
 }
 
+const staticcheckVersion = "v0.8.1"
+
 func runU1000Audit(workDir, targetPath string) ([]ASTFinding, AuditCheck) {
-	args := []string{"run", "honnef.co/go/tools/cmd/staticcheck@latest", "-f", "json", "-checks=U1000", "-fail=", targetPath}
+	args := []string{"run", "honnef.co/go/tools/cmd/staticcheck@" + staticcheckVersion, "-f", "json", "-checks=U1000", "-fail=", targetPath}
 	cmd := exec.Command("go", args...)
 	cmd.Dir = workDir
 	var stdout, stderr bytes.Buffer
@@ -27,7 +29,7 @@ func runU1000Audit(workDir, targetPath string) ([]ASTFinding, AuditCheck) {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	output := stdout.String() + stderr.String()
-	check := AuditCheck{Name: "u1000", Command: "go " + strings.Join(args, " "), Passed: err == nil, Output: output}
+	check := AuditCheck{Name: "u1000", Command: "go " + strings.Join(args, " "), ToolVersion: "staticcheck " + staticcheckVersion, Passed: err == nil, Output: output}
 	if err != nil {
 		check.Output = fmt.Sprintf("%v\n%s", err, output)
 		return nil, check

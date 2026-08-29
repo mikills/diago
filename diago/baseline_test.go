@@ -170,3 +170,11 @@ func TestLoadAuditReportErrors(t *testing.T) {
 		t.Error("expected error for invalid JSON baseline")
 	}
 }
+
+func TestModernizeBaselineKey(t *testing.T) {
+	legacy := ASTFinding{Rule: "modernize", File: "sample.go", Symbol: "rangeint", Message: "use range over int"}
+	current := ASTFinding{Rule: "modernize/rangeint", File: "sample.go", Symbol: "rangeint", Message: "use range over int"}
+	if astFindingKey(legacy) != astFindingKey(current) {
+		t.Fatalf("legacy and current modernize findings must share a baseline key")
+	}
+}

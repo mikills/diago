@@ -46,7 +46,7 @@ func assertModernizeFinding(t *testing.T, findings []ASTFinding, symbol string) 
 		t.Fatalf("got %d findings, want 1", len(findings))
 	}
 	finding := findings[0]
-	if finding.Rule != "modernize" || finding.Symbol != symbol || finding.File != "/tmp/project/file.go" || finding.Line != 12 {
+	if finding.Rule != "modernize/"+symbol || finding.Symbol != symbol || finding.File != "/tmp/project/file.go" || finding.Line != 12 {
 		t.Fatalf("unexpected finding: %#v", finding)
 	}
 }

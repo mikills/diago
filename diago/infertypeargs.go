@@ -14,7 +14,7 @@ const inferTypeArgsMessage = "unnecessary type arguments"
 // calls. The analyzer lives only inside gopls, so it runs via `gopls check`
 // and is report-only (no -fix).
 func runInferTypeArgsAudit(workDir, targetPath string) ([]ASTFinding, AuditCheck) {
-	check := AuditCheck{Name: "infertypeargs", Command: "go run golang.org/x/tools/gopls@latest check -severity hint <files>"}
+	check := AuditCheck{Name: "infertypeargs", Command: "go run golang.org/x/tools/gopls@" + goplsModernizeVersion + " check -severity hint <files>", ToolVersion: "gopls " + goplsModernizeVersion}
 	files, err := goFilesForTarget(workDir, targetPath)
 	if err != nil {
 		check.Output = err.Error()
@@ -26,7 +26,7 @@ func runInferTypeArgsAudit(workDir, targetPath string) ([]ASTFinding, AuditCheck
 		return nil, check
 	}
 
-	args := append([]string{"run", "golang.org/x/tools/gopls@latest", "check", "-severity", "hint"}, files...)
+	args := append([]string{"run", "golang.org/x/tools/gopls@" + goplsModernizeVersion, "check", "-severity", "hint"}, files...)
 	cmd := exec.Command("go", args...)
 	cmd.Dir = workDir
 	var stdout, stderr bytes.Buffer

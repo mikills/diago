@@ -237,6 +237,7 @@ func findExtraFunctionSignals(findings *[]ASTFinding, ctx astContext, file *ast.
 			continue
 		}
 		findErrorHandlingSignals(findings, ctx, fn, name)
+		findIteratorErrorSignals(findings, ctx, fn, name)
 		findRecoverMisuse(findings, ctx, fn, name)
 		findContextAndTimeoutSignals(findings, ctx, fn, name)
 		findResourceCloseSignals(findings, ctx, fn, name)

@@ -15,8 +15,10 @@ type modernizeDiagnostic struct {
 	Message  string `json:"message"`
 }
 
+const goplsModernizeVersion = "v0.18.0"
+
 func runModernizeAudit(workDir, targetPath string, fix bool) ([]ASTFinding, AuditCheck) {
-	args := []string{"run", "golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest", "-json", "-test"}
+	args := []string{"run", "golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@" + goplsModernizeVersion, "-json", "-test"}
 	if fix {
 		args = append(args, "-fix")
 	}
@@ -28,7 +30,7 @@ func runModernizeAudit(workDir, targetPath string, fix bool) ([]ASTFinding, Audi
 	cmd.Stderr = &out
 	err := cmd.Run()
 	output := out.String()
-	check := AuditCheck{Name: "modernize", Command: "go " + strings.Join(args, " "), Passed: err == nil, Output: output}
+	check := AuditCheck{Name: "modernize", Command: "go " + strings.Join(args, " "), ToolVersion: "gopls modernize " + goplsModernizeVersion, Passed: err == nil, Output: output}
 	if err != nil {
 		check.Output = fmt.Sprintf("%v\n%s", err, output)
 		return nil, check
@@ -70,7 +72,7 @@ func parseModernizeOutput(output string) ([]ASTFinding, error) {
 				}
 				seen[key] = true
 				findings = append(findings, ASTFinding{
-					Rule:     "modernize",
+					Rule:     "modernize/" + symbol,
 					Severity: "low",
 					Package:  pkg,
 					File:     file,
