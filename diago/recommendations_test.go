@@ -106,6 +106,37 @@ func TestBaselineRecommendations(t *testing.T) {
 	assertRecommendations(t, got, want)
 }
 
+func TestStaticcheckRecommendation(t *testing.T) {
+	finding := ASTFinding{
+		Rule: "staticcheck/SA4006", Severity: "high", File: "handler.go", Line: 18, Symbol: "SA4006",
+		Message: "this value of err is never used",
+	}
+	got := BuildRecommendations([]ASTFinding{finding}, 0)
+	want := []Recommendation{{
+		Rule:       "staticcheck/SA4006",
+		Severity:   "high",
+		Confidence: "high",
+		Message:    "Use or return the overwritten value; an error check or dead assignment may be missing. (1 finding)",
+		Symbols:    []string{"SA4006"},
+		Examples:   []ASTFinding{finding},
+	}}
+	assertRecommendations(t, got, want)
+}
+
+func TestSA5010Advice(t *testing.T) {
+	finding := ASTFinding{Rule: "staticcheck/SA5010", Severity: "high", Symbol: "SA5010", Message: "impossible type assertion"}
+	got := BuildRecommendations([]ASTFinding{finding}, 0)
+	want := []Recommendation{{
+		Rule:       "staticcheck/SA5010",
+		Severity:   "high",
+		Confidence: "high",
+		Message:    "Change the assertion or reconcile conflicting interface method signatures; this conversion can never succeed. (1 finding)",
+		Symbols:    []string{"SA5010"},
+		Examples:   []ASTFinding{finding},
+	}}
+	assertRecommendations(t, got, want)
+}
+
 func assertRecommendations(t *testing.T, got, want []Recommendation) {
 	t.Helper()
 	if len(got) != len(want) {

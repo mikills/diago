@@ -26,6 +26,7 @@ type AuditConfig struct {
 	DeadCode     bool         `json:"deadcode"`
 	DeadCodeFix  bool         `json:"deadcode_fix"`
 	U1000        bool         `json:"u1000"`
+	Staticcheck  bool         `json:"staticcheck"`
 	// InferTypeArgs reports redundant explicit type arguments via gopls (report-only).
 	InferTypeArgs bool `json:"infertypeargs"`
 	SummaryLimit  int  `json:"summary_limit"`
@@ -237,6 +238,7 @@ func runOptionalAuditChecks(report *AuditReport, cfg AuditConfig, workDir, targe
 	runASTAuditCheck(report, cfg, workDir, targetPath)
 	runModernizeAuditCheck(report, cfg, workDir, targetPath, targetGoVersion)
 	runU1000AuditCheck(report, cfg, workDir, targetPath)
+	runStaticcheckAuditCheck(report, cfg, workDir, targetPath)
 	runInferTypeArgsAuditCheck(report, cfg, workDir, targetPath)
 	runDeadCodeFixCheck(report, cfg, workDir, targetPath)
 }
@@ -304,6 +306,16 @@ func runU1000AuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPat
 		return
 	}
 	findings, check := runU1000Audit(workDir, targetPath)
+	report.addCheck(check)
+	findings = filterSkippedFindings(findings, workDir, cfg.IncludeGenerated)
+	report.ASTFindings = append(report.ASTFindings, findings...)
+}
+
+func runStaticcheckAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
+	if !cfg.Staticcheck {
+		return
+	}
+	findings, check := runCuratedStaticcheckAudit(workDir, targetPath)
 	report.addCheck(check)
 	findings = filterSkippedFindings(findings, workDir, cfg.IncludeGenerated)
 	report.ASTFindings = append(report.ASTFindings, findings...)
@@ -651,6 +663,11 @@ func AuditRuleOrder() []string {
 		"large-package",
 		"long-test-name",
 		"u1000",
+		"staticcheck/SA2000",
+		"staticcheck/SA4006",
+		"staticcheck/SA4010",
+		"staticcheck/SA5001",
+		"staticcheck/SA5010",
 		"modernize",
 		"infertypeargs",
 	}

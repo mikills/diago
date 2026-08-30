@@ -59,6 +59,29 @@ func TestRuleCatalogGatesModernizers(t *testing.T) {
 	}
 }
 
+func TestStaticcheckMetadata(t *testing.T) {
+	descriptor, ok := descriptorForRule("staticcheck/SA5001")
+	if !ok {
+		t.Fatal("expected Staticcheck descriptor")
+	}
+	if descriptor.Source != "staticcheck" || descriptor.Severity != "high" || descriptor.FixSafety != FixSafetyNone {
+		t.Fatalf("unexpected Staticcheck descriptor: %+v", descriptor)
+	}
+	if _, ok := descriptorForRule("staticcheck/SA9999"); ok {
+		t.Fatal("unknown Staticcheck code must not become a supported rule")
+	}
+	descriptors := supportedRuleDescriptors("1.22")
+	found := map[string]bool{}
+	for _, descriptor := range descriptors {
+		found[descriptor.ID] = true
+	}
+	for _, rule := range curatedStaticcheckProfile.Rules {
+		if !found[rule.Rule] {
+			t.Errorf("clean audit metadata missing %s", rule.Rule)
+		}
+	}
+}
+
 func TestAuditVersionMetadata(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/sample\n\ngo 1.22\n"), 0o644); err != nil {

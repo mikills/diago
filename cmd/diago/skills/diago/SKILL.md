@@ -98,11 +98,23 @@ diago -target ./... -modernize -fix   # apply the modernize fixes
 diago -target ./... -deadcode         # report dead-code hints
 diago -target ./... -deadcode -fix    # remove narrow unexported dead functions
 diago -target ./... -u1000            # Staticcheck U1000 unused-code diagnostics
+diago -target ./... -staticcheck      # curated Staticcheck correctness diagnostics
 diago -target ./... -infertypeargs    # redundant explicit type arguments (gopls, report-only)
 diago -target ./... -ast=false        # disable native AST checks
 ```
 
 `-fix` applies fixes only for `-modernize` and/or `-deadcode`. Always review the diff afterward — `-deadcode -fix` deletes code.
+
+### Vettool integration
+
+Build the iterator checks as a standard vettool when an editor or build system needs them:
+
+```sh
+go build -o ./bin/diago-vettool ./cmd/diago-vettool
+go vet -vettool=./bin/diago-vettool ./...
+```
+
+It reports the `sql-rows-err` and `scanner-err` categories, skipping generated and whole-file-ignored sources.
 
 The command exits non-zero when the audit fails, so it can gate CI. A summary prints to stdout and the full report is written to `-output` (default `.diago/audit.txt`).
 
@@ -119,6 +131,7 @@ The command exits non-zero when the audit fails, so it can gate CI. A summary pr
 -modernize       run gopls modernize diagnostics (default false)
 -deadcode        report dead-code hints. With -fix, removes narrow unexported dead functions
 -u1000           run Staticcheck U1000 unused-code diagnostics
+-staticcheck     run curated Staticcheck correctness diagnostics
 -infertypeargs   report redundant explicit type arguments via gopls (report-only, no -fix)
 -fix             apply fixes for -modernize or -deadcode
 -baseline        path to a JSON audit report; report and gate on NEW findings only

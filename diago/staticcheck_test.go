@@ -19,3 +19,28 @@ func TestParseStaticcheckOutput(t *testing.T) {
 		}
 	})
 }
+
+func TestCuratedStaticcheckOutput(t *testing.T) {
+	findings, err := parseCuratedStaticcheckOutput(`{"code":"SA2000","severity":"warning","location":{"file":"/tmp/wait.go","line":8,"column":2},"message":"sync.WaitGroup.Add should not be called from inside a goroutine"}
+{"code":"SA4006","severity":"warning","location":{"file":"/tmp/value.go","line":12,"column":2},"message":"this value of err is never used"}
+{"code":"U1000","severity":"warning","location":{"file":"/tmp/unused.go","line":2,"column":6},"message":"func unused is unused"}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("got %d findings, want 2", len(findings))
+	}
+	want := []ASTFinding{
+		{Rule: "staticcheck/SA2000", Severity: "high", File: "/tmp/wait.go", Line: 8, Symbol: "SA2000", Message: "sync.WaitGroup.Add should not be called from inside a goroutine"},
+		{Rule: "staticcheck/SA4006", Severity: "high", File: "/tmp/value.go", Line: 12, Symbol: "SA4006", Message: "this value of err is never used"},
+	}
+	for i := range want {
+		if findings[i] != want[i] {
+			t.Errorf("findings[%d] = %#v, want %#v", i, findings[i], want[i])
+		}
+	}
+	if got := staticcheckCodes(curatedStaticcheckProfile.Rules); got != "SA2000,SA4006,SA4010,SA5001,SA5010" {
+		t.Fatalf("curated check codes = %q", got)
+	}
+}
