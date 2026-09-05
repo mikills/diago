@@ -107,6 +107,11 @@ func analyzePackage(findings *[]ASTFinding, pkg goListPackage) packageStats {
 		parsedFiles[file] = parsed
 	}
 	typeInfo := checkPackageTypes(pkg, fset, parsedFiles)
+	if typeInfo == nil {
+		loc := astLocation{pkg: pkg.ImportPath, file: pkg.Dir, line: 1}
+		msg := "type checking unavailable (export-data skew?); type-dependent rules skipped"
+		*findings = append(*findings, astFinding("type-info-unavailable", "high", loc, "", msg))
+	}
 	releases := collectReleaseParams(parsedFiles, pkg.GoFiles)
 	cancelers := collectCancelParams(pkg.ImportPath, parsedFiles, pkg.GoFiles, typeInfo)
 	params := analyzePackageFileParams{
@@ -178,14 +183,16 @@ func checkPackageTypes(pkg goListPackage, fset *token.FileSet, parsed map[string
 			files = append(files, file)
 		}
 	}
-	info := &types.Info{
-		Types:      make(map[ast.Expr]types.TypeAndValue),
-		Defs:       make(map[*ast.Ident]types.Object),
-		Uses:       make(map[*ast.Ident]types.Object),
-		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+	newInfo := func() *types.Info {
+		return &types.Info{
+			Types:      make(map[ast.Expr]types.TypeAndValue),
+			Defs:       make(map[*ast.Ident]types.Object),
+			Uses:       make(map[*ast.Ident]types.Object),
+			Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		}
 	}
 	if len(files) == 0 {
-		return info
+		return newInfo()
 	}
 	lookup := func(path string) (io.ReadCloser, error) {
 		export := pkg.exports[path]
@@ -198,8 +205,42 @@ func checkPackageTypes(pkg goListPackage, fset *token.FileSet, parsed map[string
 		Importer: importer.ForCompiler(fset, "gc", lookup),
 		Error:    func(error) {},
 	}
-	_, _ = conf.Check(pkg.ImportPath, fset, files, info)
+	info := newInfo()
+	if detail := tryTypeCheck(&conf, pkg.ImportPath, fset, files, info); detail != nil {
+		fmt.Fprintf(os.Stderr, "diago: type info unavailable for %s: %v\n", pkg.ImportPath, detail)
+		return nil
+	}
 	return info
+}
+
+// tryTypeCheck converts export-data skew panics into a value; re-raises the rest.
+func tryTypeCheck(conf *types.Config, importPath string, fset *token.FileSet, files []*ast.File, info *types.Info) (skewDetail any) {
+	defer func() {
+		if r := recover(); r != nil {
+			if isImporterSkewPanic(r) {
+				skewDetail = r
+				return
+			}
+			panic(r)
+		}
+	}()
+	_, _ = conf.Check(importPath, fset, files, info)
+	return nil
+}
+
+func isImporterSkewPanic(r any) bool {
+	var msg string
+	switch v := r.(type) {
+	case error:
+		msg = v.Error()
+	case string:
+		msg = v
+	case fmt.Stringer:
+		msg = v.String()
+	default:
+		return false
+	}
+	return strings.Contains(msg, "export data") || strings.Contains(msg, "cannot decode")
 }
 
 func appendLargeFileFinding(findings *[]ASTFinding, ctx astContext, lineCount int) {

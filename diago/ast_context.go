@@ -696,6 +696,9 @@ func transferredParameterIndexes(
 
 func parameterIndexesInNode(node ast.Node, params map[types.Object]int, info *types.Info) map[int]bool {
 	indexes := map[int]bool{}
+	if info == nil {
+		return indexes
+	}
 	ast.Inspect(node, func(child ast.Node) bool {
 		ident, ok := child.(*ast.Ident)
 		if ok {
@@ -720,6 +723,9 @@ func directlyCalledParameters(
 	info *types.Info,
 ) map[int]bool {
 	called := map[int]bool{}
+	if info == nil {
+		return called
+	}
 	if ident, ok := call.Fun.(*ast.Ident); ok {
 		if index, parameter := params[info.Uses[ident]]; parameter {
 			called[index] = true
