@@ -238,7 +238,7 @@ func isIteratorErrCall(ctx astContext, call *ast.CallExpr, iterator iteratorLoop
 		return false
 	}
 	ident, ok := selector.X.(*ast.Ident)
-	if !ok || ctx.types.Uses[ident] != iterator.obj {
+	if !ok || ctx.types == nil || ctx.types.Uses[ident] != iterator.obj {
 		return false
 	}
 	method, ok := calledObject(ctx, call).(*types.Func)
