@@ -1,6 +1,6 @@
 ---
 name: diago
-description: Run Go diagnostics, audits, and performance profiling with the diago CLI, and follow a staged workflow to take a Go codebase from a fresh checkout to a healthy state. Use when the user wants to audit a Go codebase for complexity/error-handling/resource/dead-code/maintainability issues, check coverage or run -race tests, modernize code with gopls, find unused code (Staticcheck U1000), format Go with gofmt + golines, or profile benchmarks (CPU/memory/mutex/block/escape) and compare perf reports. Triggers include "audit this Go code", "run diago", "clean up / improve this Go project", "check code complexity", "find dead code", "profile this benchmark", "modernize my Go".
+description: Run Go diagnostics, audits, and performance profiling with the diago CLI, and follow a staged workflow to take a Go codebase from a fresh checkout to a healthy state. Use when the user wants to audit a Go codebase for complexity/error-handling/resource/dead-code/maintainability issues, check coverage or run -race tests, modernize code with x/tools, find unused code (Staticcheck U1000), format Go with gofmt + golines, or profile benchmarks (CPU/memory/mutex/block/escape) and compare perf reports. Triggers include "audit this Go code", "run diago", "clean up / improve this Go project", "check code complexity", "find dead code", "profile this benchmark", "modernize my Go".
 ---
 
 # diago
@@ -41,7 +41,7 @@ Fix any failing tests or vet errors before touching anything else.
 
 **Stage 3 — Safe auto-fixes.** Apply the mechanical rewrites, then review the diff and re-run tests.
 ```sh
-diago -target ./... -modernize -fix    # gopls modernizations
+diago -target ./... -modernize -fix    # x/tools modernizations
 diago -target ./... -deadcode  -fix    # remove narrow unexported dead functions
 ```
 
@@ -93,7 +93,7 @@ Opt into extra checks:
 
 ```sh
 diago -target ./... -coverage -deps   # coverage summary + dependency list
-diago -target ./... -modernize        # gopls modernize diagnostics
+diago -target ./... -modernize        # x/tools modernize diagnostics
 diago -target ./... -modernize -fix   # apply the modernize fixes
 diago -target ./... -deadcode         # report dead-code hints
 diago -target ./... -deadcode -fix    # remove narrow unexported dead functions
@@ -128,7 +128,7 @@ The command exits non-zero when the audit fails, so it can gate CI. A summary pr
 -coverage        collect coverage (default false)
 -deps            list dependencies (default false)
 -ast             run native AST checks (default true)
--modernize       run gopls modernize diagnostics (default false)
+-modernize       run x/tools modernize diagnostics (default false)
 -deadcode        report dead-code hints. With -fix, removes narrow unexported dead functions
 -u1000           run Staticcheck U1000 unused-code diagnostics
 -staticcheck     run curated Staticcheck correctness diagnostics

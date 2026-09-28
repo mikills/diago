@@ -78,6 +78,38 @@ func TestCheckPackageTypesEmptyPackage(t *testing.T) {
 	}
 }
 
+func TestCheckPackageTypesReadsTargetToolchainExports(t *testing.T) {
+	const source = "package fixture\nimport \"fmt\"\nvar _ = fmt.Sprintf(\"%s\", \"ok\")\n"
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "fixture.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exports := listExportFiles(t.TempDir(), "fmt")
+	if exports["fmt"] == "" {
+		t.Fatal("go list did not return fmt export data")
+	}
+	pkg := goListPackage{
+		ImportPath: "example.com/fixture",
+		GoFiles:    []string{"fixture.go"},
+		exports:    exports,
+	}
+	info := checkPackageTypes(pkg, fset, map[string]*ast.File{"fixture.go": file})
+	if info == nil {
+		t.Fatal("type information unavailable for target toolchain export data")
+	}
+	var sprintf *ast.Ident
+	ast.Inspect(file, func(node ast.Node) bool {
+		if selector, ok := node.(*ast.SelectorExpr); ok && selector.Sel.Name == "Sprintf" {
+			sprintf = selector.Sel
+		}
+		return true
+	})
+	if sprintf == nil || info.Uses[sprintf] == nil {
+		t.Fatal("fmt.Sprintf was not resolved from export data")
+	}
+}
+
 func TestNilTypeInfoGuards(t *testing.T) {
 	t.Run("parameterIndexesInNode", func(t *testing.T) {
 		_, files := parseTypeCheckFixture(t, "package p\n\nfunc f() { x := 1; _ = x }\n")
