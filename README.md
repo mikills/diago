@@ -166,7 +166,7 @@ Audit:
 -coverage        collect coverage (default false)
 -deps            list dependencies (default false)
 -ast             run native AST checks (default true)
--modernize       run gopls modernize diagnostics (default false)
+-modernize       run x/tools modernize diagnostics (default false)
 -deadcode        report dead-code hints. With -fix, removes narrow unexported dead functions
 -u1000           run Staticcheck U1000 unused-code diagnostics
 -staticcheck     run curated Staticcheck correctness diagnostics

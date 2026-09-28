@@ -6,16 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
-	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"golang.org/x/tools/go/gcexportdata"
 )
 
 var longTestNamePattern = regexp.MustCompile(`^Test[A-Za-z0-9_]{32,}$`)
@@ -194,15 +194,8 @@ func checkPackageTypes(pkg goListPackage, fset *token.FileSet, parsed map[string
 	if len(files) == 0 {
 		return newInfo()
 	}
-	lookup := func(path string) (io.ReadCloser, error) {
-		export := pkg.exports[path]
-		if export == "" {
-			return nil, fmt.Errorf("no export data for %s", path)
-		}
-		return os.Open(export)
-	}
 	conf := types.Config{
-		Importer: importer.ForCompiler(fset, "gc", lookup),
+		Importer: &exportDataImporter{fset: fset, exports: pkg.exports, imports: make(map[string]*types.Package)},
 		Error:    func(error) {},
 	}
 	info := newInfo()
@@ -211,6 +204,42 @@ func checkPackageTypes(pkg goListPackage, fset *token.FileSet, parsed map[string
 		return nil
 	}
 	return info
+}
+
+// exportDataImporter uses the current x/tools decoder, rather than the
+// standard-library importer bundled with the Go version that built Diago.
+// This lets Diago inspect export data written by a newer target toolchain.
+type exportDataImporter struct {
+	fset    *token.FileSet
+	exports map[string]string
+	imports map[string]*types.Package
+}
+
+func (imp *exportDataImporter) Import(path string) (*types.Package, error) {
+	if path == "unsafe" {
+		return types.Unsafe, nil
+	}
+	if pkg := imp.imports[path]; pkg != nil && pkg.Complete() {
+		return pkg, nil
+	}
+	export := imp.exports[path]
+	if export == "" {
+		return nil, fmt.Errorf("no export data for %s", path)
+	}
+	file, err := os.Open(export)
+	if err != nil {
+		return nil, fmt.Errorf("open export data for %s: %w", path, err)
+	}
+	defer file.Close()
+	reader, err := gcexportdata.NewReader(file)
+	if err != nil {
+		return nil, fmt.Errorf("locate export data for %s: %w", path, err)
+	}
+	pkg, err := gcexportdata.Read(reader, imp.fset, imp.imports, path)
+	if err != nil {
+		return nil, fmt.Errorf("decode export data for %s: %w", path, err)
+	}
+	return pkg, nil
 }
 
 // tryTypeCheck converts export-data skew panics into a value; re-raises the rest.

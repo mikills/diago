@@ -353,7 +353,7 @@ func runAudit(args []string) {
 	coverage := fs.Bool("coverage", false, "run go test -coverprofile and summarize coverage")
 	deps := fs.Bool("deps", false, "run go list -deps")
 	astChecks := fs.Bool("ast", true, "run native AST checks")
-	modernize := fs.Bool("modernize", false, "run gopls modernize diagnostics")
+	modernize := fs.Bool("modernize", false, "run x/tools modernize diagnostics")
 	deadcode := fs.Bool("deadcode", false, "report dead-code hints")
 	u1000 := fs.Bool("u1000", false, "run Staticcheck U1000 unused-code diagnostics")
 	staticcheck := fs.Bool("staticcheck", false, "run curated Staticcheck correctness diagnostics")

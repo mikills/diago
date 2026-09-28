@@ -43,8 +43,8 @@ var ruleCatalog = map[string]RuleDescriptor{
 		Severity: "high", FixSafety: FixSafetyNone, Summary: "Check bufio.Scanner.Err after scanning.",
 	},
 	"modernize": {
-		ID: "modernize", Kind: "modernization", Source: "gopls", DefaultEnabled: false,
-		Severity: "low", FixSafety: FixSafetyReviewRequired, Summary: "Apply a gopls modernization when supported by the target Go version.",
+		ID: "modernize", Kind: "modernization", Source: "x/tools", DefaultEnabled: false,
+		Severity: "low", FixSafety: FixSafetyReviewRequired, Summary: "Apply an x/tools modernization when supported by the target Go version.",
 	},
 	"u1000": {
 		ID: "u1000", Kind: "maintainability", Source: "staticcheck", DefaultEnabled: false,
