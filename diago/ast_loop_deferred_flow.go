@@ -519,151 +519,183 @@ func (f *loopFlow) deferredCalls(node ast.Node, w *loopWalk) {
 // operand; free cells are still loaded when the invocation actually executes.
 func (f *loopFlow) evaluateDeferredCalls(node ast.Node, w *loopWalk, observe func(ast.Node, *loopWalk)) {
 	w.operands = map[*ast.CallExpr]*loopDeferredOperands{nil: {expressions: map[ast.Expr]loopDeferredExpression{}}}
-	var visit func(ast.Node)
-	operands := func(call *ast.CallExpr) {
-		visit(call.Fun)
-		if f.s.deferredUnevaluated(call) {
-			return
-		}
-		callee := f.deferredExpression(call.Fun, w)
-		saved := &loopDeferredOperands{callee: callee.value, origins: callee.origins}
-		for _, arg := range call.Args {
-			visit(arg)
-		}
-		// Retain every emitted argument. Bare non-call argument loads can
-		// additionally occur after a later call; completed operands and the
-		// saved callee itself must never be replaced by that later state.
-		f.joinDeferredUnorderedLoads(call.Args, w)
-		for _, arg := range call.Args {
-			value := f.deferredExpression(arg, w)
-			saved.args = append(saved.args, value.value)
-			saved.addresses = append(saved.addresses, value.address)
-			saved.argOrigins = append(saved.argOrigins, value.origins)
-		}
-		w.operands[call] = saved
+	e := &loopDeferredEvaluation{f: f, w: w, observe: observe}
+	e.visit(node)
+}
+
+// loopDeferredEvaluation is one evaluateDeferredCalls walk. A nil w.values
+// means no execution reaches the current point, which ends the walk.
+type loopDeferredEvaluation struct {
+	f       *loopFlow
+	w       *loopWalk
+	observe func(ast.Node, *loopWalk)
+}
+
+func (e *loopDeferredEvaluation) visit(n ast.Node) {
+	if n == nil || e.w.values == nil {
+		return
 	}
-	visit = func(n ast.Node) {
-		if n == nil || w.values == nil {
-			return
-		}
-		if observe != nil {
-			observe(n, w)
-		}
-		if expr, ok := n.(ast.Expr); ok {
-			// A non-call load can be unordered relative to calls inside this
-			// expression. Keep both possible loads, but never reopen a completed
-			// RHS/argument/aggregate when a later operand executes.
-			unordered := f.deferredUnorderedLoad(expr)
-			var before loopDeferredExpression
-			if unordered {
-				before = f.currentDeferredExpression(expr, w)
-			}
-			defer func() {
-				if w.values != nil {
-					value := f.emitDeferredExpression(expr, w)
-					if unordered {
-						value.value = loopDeferredUnion(value.value, before.value)
-						value.address = loopDeferredUnion(value.address, before.address)
-						value.origins = loopDeferredUnion(value.origins, before.origins)
-					}
-					w.operands[nil].expressions[expr] = value
-				}
-			}()
-		}
-		switch n := n.(type) {
-		case *ast.FuncLit:
-			return
-		case *ast.AssignStmt:
-			for _, lhs := range n.Lhs {
-				visit(lhs)
-				if w.values == nil {
-					return
-				}
-				value := f.deferredExpression(lhs, w)
-				value.roots, value.keys = f.storeRoots(lhs, w), f.storeKeys(lhs, w)
-				value.destination = true
-				w.operands[nil].expressions[lhs] = value
-			}
-			for _, rhs := range n.Rhs {
-				visit(rhs)
-			}
-			f.joinDeferredUnorderedLoads(n.Rhs, w)
-			return
-		case *ast.ValueSpec:
-			loopChildren(n, visit)
-			f.joinDeferredUnorderedLoads(n.Values, w)
-			return
-		case *ast.BinaryExpr:
-			if n.Op == token.LAND || n.Op == token.LOR {
-				visit(n.X) // the left operand executes exactly once
-				if w.values == nil {
-					return
-				}
-				left, known := f.s.deferredTruth(n.X)
-				if known && (n.Op == token.LAND && !left || n.Op == token.LOR && left) {
-					return
-				}
-				if known {
-					visit(n.Y)
-					return
-				}
-				// The RHS can strongly update captured cells, but only on its
-				// execution edge. Preserve the skipped edge, including origins
-				// and private address/epoch slots, at the expression join.
-				skipped := loopCloneValues(w.values)
-				visit(n.Y)
-				loopJoinBindings(skipped, w.values)
-				w.values = skipped
-				return
-			}
-		case *ast.GoStmt:
-			operands(n.Call)
-			if observe != nil && w.values != nil {
-				observe(n, w)
-			}
-			return
-		case *ast.DeferStmt:
-			operands(n.Call)
-			if observe != nil && w.values != nil {
-				observe(n, w)
-			}
-			return
-		case *ast.CallExpr:
-			operands(n)
-			if w.values == nil {
-				return
-			}
-			if observe != nil {
-				observe(n, w)
-			}
-			targets, opaque := f.deferred.callTargets(n, w)
-			if len(targets) == 0 {
-				return
-			}
-			out := map[*loopVariable]loopValue{}
-			completed := opaque
-			if opaque {
-				loopJoinBindings(out, w.values)
-			}
-			for _, lit := range targets {
-				inv := f.deferredCallInvocation(n, lit, w)
-				output := f.simulateDeferred(inv)
-				if output == nil {
-					continue
-				}
-				completed = true
-				loopJoinBindings(out, f.exportDeferred(inv, loopCloneValues(w.values), output))
-			}
-			if completed {
-				w.values = out
-			} else {
-				w.values = nil
-			}
-			return
-		}
-		loopChildren(n, visit)
+	if e.observe != nil {
+		e.observe(n, e.w)
 	}
-	visit(node)
+	if expr, ok := n.(ast.Expr); ok {
+		// A non-call load can be unordered relative to calls inside this
+		// expression. Keep both possible loads, but never reopen a completed
+		// RHS/argument/aggregate when a later operand executes.
+		unordered := e.f.deferredUnorderedLoad(expr)
+		var before loopDeferredExpression
+		if unordered {
+			before = e.f.currentDeferredExpression(expr, e.w)
+		}
+		defer e.emit(expr, unordered, before)
+	}
+	e.evaluate(n)
+}
+
+func (e *loopDeferredEvaluation) emit(expr ast.Expr, unordered bool, before loopDeferredExpression) {
+	if e.w.values == nil {
+		return
+	}
+	value := e.f.emitDeferredExpression(expr, e.w)
+	if unordered {
+		value.value = loopDeferredUnion(value.value, before.value)
+		value.address = loopDeferredUnion(value.address, before.address)
+		value.origins = loopDeferredUnion(value.origins, before.origins)
+	}
+	e.w.operands[nil].expressions[expr] = value
+}
+
+func (e *loopDeferredEvaluation) evaluate(n ast.Node) {
+	switch n := n.(type) {
+	case *ast.FuncLit:
+		return
+	case *ast.AssignStmt:
+		e.assign(n)
+		return
+	case *ast.ValueSpec:
+		loopChildren(n, e.visit)
+		e.f.joinDeferredUnorderedLoads(n.Values, e.w)
+		return
+	case *ast.BinaryExpr:
+		if n.Op == token.LAND || n.Op == token.LOR {
+			e.shortCircuit(n)
+			return
+		}
+	case *ast.GoStmt:
+		e.launch(n, n.Call)
+		return
+	case *ast.DeferStmt:
+		e.launch(n, n.Call)
+		return
+	case *ast.CallExpr:
+		e.call(n)
+		return
+	}
+	loopChildren(n, e.visit)
+}
+
+func (e *loopDeferredEvaluation) assign(n *ast.AssignStmt) {
+	for _, lhs := range n.Lhs {
+		e.visit(lhs)
+		if e.w.values == nil {
+			return
+		}
+		value := e.f.deferredExpression(lhs, e.w)
+		value.roots, value.keys = e.f.storeRoots(lhs, e.w), e.f.storeKeys(lhs, e.w)
+		value.destination = true
+		e.w.operands[nil].expressions[lhs] = value
+	}
+	for _, rhs := range n.Rhs {
+		e.visit(rhs)
+	}
+	e.f.joinDeferredUnorderedLoads(n.Rhs, e.w)
+}
+
+func (e *loopDeferredEvaluation) shortCircuit(n *ast.BinaryExpr) {
+	e.visit(n.X) // the left operand executes exactly once
+	if e.w.values == nil {
+		return
+	}
+	left, known := e.f.s.deferredTruth(n.X)
+	if known && (n.Op == token.LAND && !left || n.Op == token.LOR && left) {
+		return
+	}
+	if known {
+		e.visit(n.Y)
+		return
+	}
+	// The RHS can strongly update captured cells, but only on its
+	// execution edge. Preserve the skipped edge, including origins
+	// and private address/epoch slots, at the expression join.
+	skipped := loopCloneValues(e.w.values)
+	e.visit(n.Y)
+	loopJoinBindings(skipped, e.w.values)
+	e.w.values = skipped
+}
+
+// launch evaluates a go or defer statement's operands. The call itself does
+// not execute here.
+func (e *loopDeferredEvaluation) launch(stmt ast.Stmt, call *ast.CallExpr) {
+	e.operands(call)
+	if e.observe != nil && e.w.values != nil {
+		e.observe(stmt, e.w)
+	}
+}
+
+func (e *loopDeferredEvaluation) call(n *ast.CallExpr) {
+	e.operands(n)
+	if e.w.values == nil {
+		return
+	}
+	if e.observe != nil {
+		e.observe(n, e.w)
+	}
+	targets, opaque := e.f.deferred.callTargets(n, e.w)
+	if len(targets) == 0 {
+		return
+	}
+	out := map[*loopVariable]loopValue{}
+	completed := opaque
+	if opaque {
+		loopJoinBindings(out, e.w.values)
+	}
+	for _, lit := range targets {
+		inv := e.f.deferredCallInvocation(n, lit, e.w)
+		output := e.f.simulateDeferred(inv)
+		if output == nil {
+			continue
+		}
+		completed = true
+		loopJoinBindings(out, e.f.exportDeferred(inv, loopCloneValues(e.w.values), output))
+	}
+	if completed {
+		e.w.values = out
+	} else {
+		e.w.values = nil
+	}
+}
+
+func (e *loopDeferredEvaluation) operands(call *ast.CallExpr) {
+	e.visit(call.Fun)
+	if e.f.s.deferredUnevaluated(call) {
+		return
+	}
+	callee := e.f.deferredExpression(call.Fun, e.w)
+	saved := &loopDeferredOperands{callee: callee.value, origins: callee.origins}
+	for _, arg := range call.Args {
+		e.visit(arg)
+	}
+	// Retain every emitted argument. Bare non-call argument loads can
+	// additionally occur after a later call; completed operands and the
+	// saved callee itself must never be replaced by that later state.
+	e.f.joinDeferredUnorderedLoads(call.Args, e.w)
+	for _, arg := range call.Args {
+		value := e.f.deferredExpression(arg, e.w)
+		saved.args = append(saved.args, value.value)
+		saved.addresses = append(saved.addresses, value.address)
+		saved.argOrigins = append(saved.argOrigins, value.origins)
+	}
+	e.w.operands[call] = saved
 }
 
 // deferredExpression reads an emitted value, never a reconstructed RHS in the
