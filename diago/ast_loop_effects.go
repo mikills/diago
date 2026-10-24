@@ -327,133 +327,174 @@ func (e *loopFlowEffects) recordFlowEffects(node ast.Node, w *loopWalk) {
 	for _, access := range e.actual[node] {
 		e.write(access.variable, access.owner, w.loops)
 	}
-	if e.collect != nil {
-		for _, access := range e.lexical[node] {
-			mode := access.mode
-			if e.frame != nil && e.frame.execution != nil {
-				mode = e.frame.execution.referenceMode(access.variable, mode)
-			}
-			value := loopValue{access.variable: mode}
-			// Known callee execution comes from its actual context below,
-			// never from the immutable slot's source-global capture union.
-			if expr, ok := node.(ast.Expr); !ok || e.callee == nil || e.callee(expr) == nil {
-				value = e.s.expand(value, w)
-			}
-			for v, mode := range value {
-				e.collect(loopDirectAccess{variable: v, mode: mode})
-			}
+	e.collectLexical(node, w)
+	e.iterationWrite(node)
+	if !e.operationEffects(node, w) {
+		e.s.executionChildren(node, func(child ast.Node) { e.recordFlowEffects(child, w) })
+	}
+}
+
+// collectLexical feeds node's lexical identifier accesses to the
+// context-local execution summary, when a collector is installed.
+func (e *loopFlowEffects) collectLexical(node ast.Node, w *loopWalk) {
+	if e.collect == nil {
+		return
+	}
+	for _, access := range e.lexical[node] {
+		mode := access.mode
+		if e.frame != nil && e.frame.execution != nil {
+			mode = e.frame.execution.referenceMode(access.variable, mode)
+		}
+		value := loopValue{access.variable: mode}
+		// Known callee execution comes from its actual context in callEffects,
+		// never from the immutable slot's source-global capture union.
+		if expr, ok := node.(ast.Expr); !ok || e.callee == nil || e.callee(expr) == nil {
+			value = e.s.expand(value, w)
+		}
+		for v, mode := range value {
+			e.collect(loopDirectAccess{variable: v, mode: mode})
 		}
 	}
-	// := range definitions have implicit writes but no lexical identifier
-	// accesses. The adapter puts the original targets on reachable body entries.
-	if l := e.iteration[node]; l != nil {
-		if id, ok := node.(*ast.Ident); ok {
-			if v := e.s.index.ids[id]; v != nil {
-				e.write(v, l.owner, []*loopRegion{l})
-			}
+}
+
+// := range definitions have implicit writes but no lexical identifier
+// accesses. The adapter puts the original targets on reachable body entries.
+func (e *loopFlowEffects) iterationWrite(node ast.Node) {
+	l := e.iteration[node]
+	if l == nil {
+		return
+	}
+	if id, ok := node.(*ast.Ident); ok {
+		if v := e.s.index.ids[id]; v != nil {
+			e.write(v, l.owner, []*loopRegion{l})
 		}
 	}
+}
+
+// operationEffects records the effects of node's own operation. It reports
+// whether those already account for node's operands; otherwise the caller
+// records its execution children.
+func (e *loopFlowEffects) operationEffects(node ast.Node, w *loopWalk) bool {
 	switch n := node.(type) {
 	case *ast.GoStmt:
 		e.operands(n.Call, w)
-		return
 	case *ast.DeferStmt:
 		e.operands(n.Call, w)
-		return
 	case *ast.ReturnStmt:
-		for _, result := range n.Results {
-			e.recordFlowEffects(result, w)
-		}
-		// Explicit return expressions assign named results before returning.
-		// Bare returns only read them. Synthetic void returns have no indexed
-		// owner and must not inherit the root declaration's result list.
-		if _, indexed := e.s.index.locations[n]; indexed {
-			var results *ast.FieldList
-			if w.owner != nil {
-				results = w.owner.Type.Results
-			} else if decl := e.s.env.ctx.decl; decl != nil {
-				results = decl.Type.Results
-			}
-			if results != nil {
-				mode := loopRead
-				if len(n.Results) != 0 {
-					mode |= loopWrite
-				}
-				for _, field := range results.List {
-					for _, name := range field.Names {
-						if variable := e.s.index.ids[name]; variable != nil {
-							e.access(n, variable, mode, n.End(), w)
-						}
-					}
-				}
-			}
-		}
+		e.returnEffects(n, w)
+		return false
 	case *ast.CallExpr:
 		if e.s.deferredUnevaluated(n) {
-			return
+			return true
 		}
-		value := loopValue(nil)
-		if e.invoke != nil {
-			value = e.invoke(n, w)
-		}
-		if value == nil {
-			value = e.s.expand(e.s.invokeValue(n.Fun, w), w)
-		}
-		for v, mode := range value {
-			e.access(n, v, mode, n.End(), w)
-		}
+		e.callEffects(n, w)
+		return false
 	case *ast.AssignStmt:
-		// All destination addresses use the pre-assignment bindings, including
-		// parallel assignments such as p, *p = q, 1. transfer runs afterwards.
-		// The range adapter's synthetic assignment has no RHS: ast.End
-		// would panic. Its target positions precede the real loop body.
-		var pos token.Pos
-		if len(n.Rhs) != 0 {
-			pos = n.End()
-		} else if len(n.Lhs) != 0 {
-			pos = n.Lhs[len(n.Lhs)-1].End()
-		}
-		mode := loopWrite
-		if n.Tok != token.ASSIGN && n.Tok != token.DEFINE {
-			mode |= loopRead // compound assignment loads the destination too
-		}
-		for _, lhs := range n.Lhs {
-			context := e.context(lhs, w)
-			e.indirectAccess(lhs, mode, &context, pos)
-			e.addressOperands(lhs, &context)
-		}
-		for _, rhs := range n.Rhs {
-			e.recordFlowEffects(rhs, w)
-		}
-		return
+		e.assignEffects(n, w)
 	case *ast.IncDecStmt:
 		e.indirectAccess(n.X, loopRead|loopWrite, w, n.End())
 		e.addressOperands(n.X, w)
-		return
 	case *ast.UnaryExpr:
-		if n.Op == token.AND {
-			e.addressOperands(n.X, w)
-			return
+		if n.Op != token.AND {
+			return false
 		}
+		e.addressOperands(n.X, w)
 	case *ast.StarExpr:
 		e.indirectAccess(n, loopRead, w, n.End())
 		e.addressOperands(n, w)
-		return
 	case *ast.SelectorExpr:
-		if e.methodSelectionReads(n, w) {
-			return
-		}
-		if e.fieldRead(n) {
-			e.indirectAccess(n, loopRead, w, n.End())
-			e.addressOperands(n, w)
-			return
-		}
+		return e.selectorEffects(n, w)
 	case *ast.IndexExpr:
 		e.indirectAccess(n, loopRead, w, n.End())
 		e.addressOperands(n, w)
+	default:
+		return false
+	}
+	return true
+}
+
+func (e *loopFlowEffects) returnEffects(stmt *ast.ReturnStmt, w *loopWalk) {
+	for _, result := range stmt.Results {
+		e.recordFlowEffects(result, w)
+	}
+	// Explicit return expressions assign named results before returning.
+	// Bare returns only read them. Synthetic void returns have no indexed
+	// owner and must not inherit the root declaration's result list.
+	if _, indexed := e.s.index.locations[stmt]; !indexed {
 		return
 	}
-	e.s.executionChildren(node, func(child ast.Node) { e.recordFlowEffects(child, w) })
+	var results *ast.FieldList
+	if w.owner != nil {
+		results = w.owner.Type.Results
+	} else if decl := e.s.env.ctx.decl; decl != nil {
+		results = decl.Type.Results
+	}
+	if results == nil {
+		return
+	}
+	mode := loopRead
+	if len(stmt.Results) != 0 {
+		mode |= loopWrite
+	}
+	for _, field := range results.List {
+		for _, name := range field.Names {
+			if variable := e.s.index.ids[name]; variable != nil {
+				e.access(stmt, variable, mode, stmt.End(), w)
+			}
+		}
+	}
+}
+
+func (e *loopFlowEffects) callEffects(call *ast.CallExpr, w *loopWalk) {
+	value := loopValue(nil)
+	if e.invoke != nil {
+		value = e.invoke(call, w)
+	}
+	if value == nil {
+		value = e.s.expand(e.s.invokeValue(call.Fun, w), w)
+	}
+	for v, mode := range value {
+		e.access(call, v, mode, call.End(), w)
+	}
+}
+
+func (e *loopFlowEffects) assignEffects(stmt *ast.AssignStmt, w *loopWalk) {
+	// All destination addresses use the pre-assignment bindings, including
+	// parallel assignments such as p, *p = q, 1. transfer runs afterwards.
+	// The range adapter's synthetic assignment has no RHS: ast.End
+	// would panic. Its target positions precede the real loop body.
+	var pos token.Pos
+	if len(stmt.Rhs) != 0 {
+		pos = stmt.End()
+	} else if len(stmt.Lhs) != 0 {
+		pos = stmt.Lhs[len(stmt.Lhs)-1].End()
+	}
+	mode := loopWrite
+	if stmt.Tok != token.ASSIGN && stmt.Tok != token.DEFINE {
+		mode |= loopRead // compound assignment loads the destination too
+	}
+	for _, lhs := range stmt.Lhs {
+		context := e.context(lhs, w)
+		e.indirectAccess(lhs, mode, &context, pos)
+		e.addressOperands(lhs, &context)
+	}
+	for _, rhs := range stmt.Rhs {
+		e.recordFlowEffects(rhs, w)
+	}
+}
+
+// selectorEffects records a method binding's promotion-path loads or a field
+// load. Any other selector reports false, leaving its operands to the caller.
+func (e *loopFlowEffects) selectorEffects(expr *ast.SelectorExpr, w *loopWalk) bool {
+	if e.methodSelectionReads(expr, w) {
+		return true
+	}
+	if !e.fieldRead(expr) {
+		return false
+	}
+	e.indirectAccess(expr, loopRead, w, expr.End())
+	e.addressOperands(expr, w)
+	return true
 }
 
 // Method binding executes the promotion path now. Each pointer crossed to

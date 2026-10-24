@@ -155,76 +155,12 @@ func (c *loopFlowConflicts) recordGraph(graph *cfg.CFG, adapter *loopFlowAST) *l
 	}
 	// Derive reachability from edges, rather than trusting optional Live bits
 	// in hand-built graphs or lexical positions of unreachable statements.
-	reachable := map[*cfg.Block]bool{graph.Blocks[0]: true}
-	queue := []*cfg.Block{graph.Blocks[0]}
-	for head := 0; head < len(queue); head++ {
-		for _, next := range queue[head].Succs {
-			if !reachable[next] {
-				reachable[next] = true
-				queue = append(queue, next)
-			}
-		}
-	}
+	reachable := loopReachableBlocks(graph)
 	entry, exit := map[*cfg.Block]int{}, map[*cfg.Block]int{}
 	for _, block := range graph.Blocks {
-		if !reachable[block] {
-			continue
+		if reachable[block] {
+			entry[block], exit[block] = c.recordGraphBlock(g, block, adapter)
 		}
-		last := g.point() // empty blocks still carry real CFG edges
-		entry[block] = last
-		for _, node := range block.Nodes {
-			site := &loopConflictSite{launch: -1, nodes: map[ast.Node][]int{}}
-			g.sites[block] = append(g.sites[block], site)
-			g.recording = site
-			p := g.point()
-			g.edge(last, p)
-			last = p
-			last = c.recordSyncNode(g, node, p)
-			site.after = last
-			if stmt, ok := node.(*ast.DeferStmt); ok {
-				if g.registrations == nil {
-					g.registrations = map[*ast.DeferStmt][]int{}
-				}
-				g.registrations[stmt] = append(g.registrations[stmt], last)
-			}
-			if adapter != nil && adapter.deferred != nil {
-				if marker, ok := adapter.deferred.markers[node]; ok && marker.entry {
-					if g.resets == nil {
-						g.resets = map[*ast.FuncLit][]int{}
-					}
-					g.resets[marker.owner] = append(g.resets[marker.owner], p)
-				}
-			}
-			if adapter != nil {
-				if region := adapter.copySteps[node]; region != nil {
-					for v := range region.copies {
-						g.copies[v] = append(g.copies[v], p)
-					}
-				}
-				if rng := adapter.steps[node]; rng != nil && rng.stmt.Tok == token.DEFINE {
-					for _, target := range []ast.Expr{rng.stmt.Key, rng.stmt.Value} {
-						if id, ok := target.(*ast.Ident); ok {
-							if v := c.s.index.ids[id]; v != nil {
-								if v.birth == c.s.index.regions[rng.stmt] {
-									g.births[v] = append(g.births[v], p)
-								} else {
-									g.iterations[v] = append(g.iterations[v], p)
-								}
-							}
-						}
-					}
-				}
-			}
-			if stmt, ok := node.(*ast.GoStmt); ok {
-				// Operands execute synchronously BEFORE launching. In particular,
-				// their effects must not be mistaken for accesses after this go.
-				launch := g.point()
-				g.edge(last, launch)
-				g.gos[stmt], last = launch, launch // compatibility index, not the event list
-				site.launch = launch
-			}
-		}
-		exit[block] = last
 	}
 	for _, block := range graph.Blocks {
 		if reachable[block] {
@@ -236,6 +172,93 @@ func (c *loopFlowConflicts) recordGraph(graph *cfg.CFG, adapter *loopFlowAST) *l
 	g.recording = nil
 	c.frames = append(c.frames, g)
 	return g
+}
+
+func loopReachableBlocks(graph *cfg.CFG) map[*cfg.Block]bool {
+	reachable := map[*cfg.Block]bool{graph.Blocks[0]: true}
+	queue := []*cfg.Block{graph.Blocks[0]}
+	for head := 0; head < len(queue); head++ {
+		for _, next := range queue[head].Succs {
+			if !reachable[next] {
+				reachable[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	return reachable
+}
+
+// recordGraphBlock allocates one site per node occurrence in a reachable block
+// and returns the points its predecessors enter and its successors leave.
+func (c *loopFlowConflicts) recordGraphBlock(g *loopConflictFrame, block *cfg.Block, adapter *loopFlowAST) (entry, exit int) {
+	entry = g.point() // empty blocks still carry real CFG edges
+	last := entry
+	for _, node := range block.Nodes {
+		site := &loopConflictSite{launch: -1, nodes: map[ast.Node][]int{}}
+		g.sites[block] = append(g.sites[block], site)
+		g.recording = site
+		p := g.point()
+		g.edge(last, p)
+		last = c.recordSyncNode(g, node, p)
+		site.after = last
+		if stmt, ok := node.(*ast.DeferStmt); ok {
+			if g.registrations == nil {
+				g.registrations = map[*ast.DeferStmt][]int{}
+			}
+			g.registrations[stmt] = append(g.registrations[stmt], last)
+		}
+		c.recordAdapterMarkers(g, adapter, node, p)
+		if stmt, ok := node.(*ast.GoStmt); ok {
+			// Operands execute synchronously BEFORE launching. In particular,
+			// their effects must not be mistaken for accesses after this go.
+			launch := g.point()
+			g.edge(last, launch)
+			g.gos[stmt], last = launch, launch // compatibility index, not the event list
+			site.launch = launch
+		}
+	}
+	return entry, last
+}
+
+// recordAdapterMarkers indexes the adapter's synthetic nodes at point p:
+// inlined-function entry markers, iteration copy steps and := range steps.
+func (c *loopFlowConflicts) recordAdapterMarkers(g *loopConflictFrame, adapter *loopFlowAST, node ast.Node, p int) {
+	if adapter == nil {
+		return
+	}
+	if adapter.deferred != nil {
+		if marker, ok := adapter.deferred.markers[node]; ok && marker.entry {
+			if g.resets == nil {
+				g.resets = map[*ast.FuncLit][]int{}
+			}
+			g.resets[marker.owner] = append(g.resets[marker.owner], p)
+		}
+	}
+	if region := adapter.copySteps[node]; region != nil {
+		for v := range region.copies {
+			g.copies[v] = append(g.copies[v], p)
+		}
+	}
+	if rng := adapter.steps[node]; rng != nil && rng.stmt.Tok == token.DEFINE {
+		c.recordRangeDefinitions(g, rng.stmt, p)
+	}
+}
+
+// recordRangeDefinitions marks the := targets of a range step at point p. A
+// target born in the range's own region gets new storage there; any other
+// target is a per-iteration write to existing storage.
+func (c *loopFlowConflicts) recordRangeDefinitions(g *loopConflictFrame, rng *ast.RangeStmt, p int) {
+	for _, target := range []ast.Expr{rng.Key, rng.Value} {
+		if id, ok := target.(*ast.Ident); ok {
+			if v := c.s.index.ids[id]; v != nil {
+				if v.birth == c.s.index.regions[rng] {
+					g.births[v] = append(g.births[v], p)
+				} else {
+					g.iterations[v] = append(g.iterations[v], p)
+				}
+			}
+		}
+	}
 }
 
 const (

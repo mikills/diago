@@ -84,37 +84,19 @@ func (f *loopFlow) refineDeferredContext(body *ast.BlockStmt, seed map[*loopVari
 		f.effects.physical, f.effects.collect, f.effects.frame, f.effects.states = physical, collect, effectFrame, states
 	}()
 	if c.contexts == nil {
-		c.contexts = map[*ast.BlockStmt]map[uint64][]*loopConflictFrame{}
-		c.ids = map[*loopVariable]uint64{}
-		c.callee = c.syncLiteralCallee()
-		c.refined = true
-		f.effects.conflicts, f.effects.callee = c, c.callee
-		f.effects.invoke = func(call *ast.CallExpr, w *loopWalk) loopValue {
-			targets, opaque := f.invocationContexts(call, w, true)
-			if len(targets) == 0 {
-				return nil
-			}
-			value := loopValue{}
-			if opaque {
-				loopMerge(value, s.expand(s.invokeValue(call.Fun, w), w))
-			}
-			for _, target := range targets {
-				loopMerge(value, loopSyncOutside(f.effects.summaries[target], target.owner))
-			}
-			return value
-		}
+		f.beginContextRecording()
 	}
 	if f.deferred == nil {
 		f.deferred = newLoopDeferredFlow(s, f.aliases)
 	}
 	key := c.contextKey(seed, actual)
 	for _, prior := range c.contexts[body][key] {
-		if prior.actual == actual && loopContextBindingsEqual(prior.seed, seed) && loopDeferredExecutionEqual(prior.execution, execution) {
+		if prior.refinedFrom(seed, actual, execution) {
 			return prior
 		}
 	}
 	prepared := f.prepareDeferredCFG(body, owner)
-	adapter, graph, plan := prepared.adapter, prepared.graph, prepared.plan
+	adapter, graph := prepared.adapter, prepared.graph
 	if adapter.iteratorIncomplete != nil {
 		s.finding(adapter.iteratorIncomplete, "iterator-analysis-incomplete", "iterator control-flow expansion exceeded its analysis budget; goroutine-in-loop results may be incomplete")
 	}
@@ -125,12 +107,81 @@ func (f *loopFlow) refineDeferredContext(body *ast.BlockStmt, seed map[*loopVari
 		c.contexts[body] = map[uint64][]*loopConflictFrame{}
 	}
 	c.contexts[body][key] = append(c.contexts[body][key], frame)
-	live := f.loopFlowLiveness(graph, adapter, seed)
-	inputs := make([]map[*loopVariable]loopValue, len(graph.Blocks))
-	savedInputs := make([]*loopDeferredBindings, len(graph.Blocks))
-	entry := &loopWalk{values: loopCloneValues(seed), persistentDeferred: plan.persistent}
-	f.deferred.enter(owner, entry)
-	inputs[0] = loopPruneBindings(entry.values, live[0], f.aliases, f.deferred.companions)
+	r := &loopContextRefinement{loopDeferredCFG: prepared, frame: frame, live: f.loopFlowLiveness(graph, adapter, seed)}
+	f.solveContext(r)
+
+	// Replay only after convergence: intermediate loop states must not pollute
+	// launch snapshots or the entry states of nested function frames.
+	f.replayContext(r)
+	for lit, entry := range r.literals {
+		if !adapter.inlinedIterators[lit] {
+			child := f.refineContext(lit.Body, entry, lit, false)
+			frame.constructors = append(frame.constructors, child)
+		}
+	}
+	return frame
+}
+
+// loopContextRefinement is one execution context being refined: its prepared
+// CFG and recorder frame, the block entry states the fixed point converges
+// to, and what post-convergence replay collects.
+type loopContextRefinement struct {
+	*loopDeferredCFG
+	frame       *loopConflictFrame
+	live        []map[*loopVariable]bool
+	inputs      []map[*loopVariable]loopValue
+	savedInputs []*loopDeferredBindings
+
+	// The frame's execution summary, and the joined entry bindings of each
+	// literal constructed in this frame. Literal bodies are refined afterwards.
+	summary  loopValue
+	literals map[*ast.FuncLit]map[*loopVariable]loopValue
+}
+
+// refinedFrom reports whether an interned context was refined from the same
+// entry bindings, invocation kind and deferred execution.
+func (g *loopConflictFrame) refinedFrom(seed map[*loopVariable]loopValue, actual bool, execution *loopDeferredInvocation) bool {
+	return g.actual == actual && loopContextBindingsEqual(g.seed, seed) && loopDeferredExecutionEqual(g.execution, execution)
+}
+
+// beginContextRecording switches the shared recorder to interned execution
+// contexts. Calls with known literal callees then take their effects from
+// those contexts' summaries.
+func (f *loopFlow) beginContextRecording() {
+	c := f.conflicts
+	c.contexts = map[*ast.BlockStmt]map[uint64][]*loopConflictFrame{}
+	c.ids = map[*loopVariable]uint64{}
+	c.callee = c.syncLiteralCallee()
+	c.refined = true
+	f.effects.conflicts, f.effects.callee = c, c.callee
+	f.effects.invoke = f.invocationSummary
+}
+
+// invocationSummary is what a synchronous call executes in its actual callee
+// contexts, or nil when no context is known.
+func (f *loopFlow) invocationSummary(call *ast.CallExpr, w *loopWalk) loopValue {
+	targets, opaque := f.invocationContexts(call, w, true)
+	if len(targets) == 0 {
+		return nil
+	}
+	value := loopValue{}
+	if opaque {
+		loopMerge(value, f.s.expand(f.s.invokeValue(call.Fun, w), w))
+	}
+	for _, target := range targets {
+		loopMerge(value, loopSyncOutside(f.effects.summaries[target], target.owner))
+	}
+	return value
+}
+
+// solveContext iterates the context's block entry states to a fixed point.
+func (f *loopFlow) solveContext(r *loopContextRefinement) {
+	graph, plan := r.graph, r.plan
+	r.inputs = make([]map[*loopVariable]loopValue, len(graph.Blocks))
+	r.savedInputs = make([]*loopDeferredBindings, len(graph.Blocks))
+	entry := &loopWalk{values: loopCloneValues(r.frame.seed), persistentDeferred: plan.persistent}
+	f.deferred.enter(r.frame.owner, entry)
+	r.inputs[0] = loopPruneBindings(entry.values, r.live[0], f.aliases, f.deferred.companions)
 	queue := []*cfg.Block{graph.Blocks[0]}
 	queued := make([]bool, len(graph.Blocks))
 	queued[0] = true
@@ -138,10 +189,10 @@ func (f *loopFlow) refineDeferredContext(body *ast.BlockStmt, seed map[*loopVari
 		block := queue[0]
 		queue = queue[1:]
 		queued[block.Index] = false
-		w := &loopWalk{values: loopPruneBindings(inputs[block.Index], live[block.Index], f.aliases, f.deferred.companions), aliases: f.aliases, reference: execution, persistentDeferred: plan.persistent, deferredBindings: savedInputs[block.Index]}
+		w := f.contextBlockWalk(r, block)
 		for _, node := range block.Nodes {
-			f.advanceLoopEpoch(node, w, adapter)
-			f.transferDeferredNode(plan, node, w, adapter, execution)
+			f.advanceLoopEpoch(node, w, r.adapter)
+			f.transferDeferredNode(plan, node, w, r.adapter, r.frame.execution)
 			if w.values == nil {
 				break
 			}
@@ -154,37 +205,53 @@ func (f *loopFlow) refineDeferredContext(body *ast.BlockStmt, seed map[*loopVari
 			continue
 		}
 		for _, next := range block.Succs {
-			first := inputs[next.Index] == nil
-			if first {
-				inputs[next.Index] = map[*loopVariable]loopValue{}
-			}
-			outgoing := loopPruneBindings(w.values, live[next.Index], f.aliases, f.deferred.companions)
-			changed := loopJoinBindings(inputs[next.Index], outgoing)
-			joined := loopDeferredJoin(savedInputs[next.Index], w.deferredBindings, 28)
-			changed = changed || joined != savedInputs[next.Index]
-			savedInputs[next.Index] = joined
-			// Even an empty state must propagate reachability.
-			if (first || changed) && !queued[next.Index] {
+			if f.joinContextInput(r, next, w) && !queued[next.Index] {
 				queue = append(queue, next)
 				queued[next.Index] = true
 			}
 		}
 	}
+}
 
-	// Replay only after convergence: intermediate loop states must not pollute
-	// launch snapshots or the entry states of nested function frames.
-	literals := map[*ast.FuncLit]map[*loopVariable]loopValue{}
+// contextBlockWalk starts a walk of block from its current entry state.
+func (f *loopFlow) contextBlockWalk(r *loopContextRefinement, block *cfg.Block) *loopWalk {
+	return &loopWalk{values: loopPruneBindings(r.inputs[block.Index], r.live[block.Index], f.aliases, f.deferred.companions), aliases: f.aliases, reference: r.frame.execution, persistentDeferred: r.plan.persistent, deferredBindings: r.savedInputs[block.Index]}
+}
+
+// joinContextInput joins w's exit state into next's entry state and reports
+// whether next must be (re)visited.
+func (f *loopFlow) joinContextInput(r *loopContextRefinement, next *cfg.Block, w *loopWalk) bool {
+	first := r.inputs[next.Index] == nil
+	if first {
+		r.inputs[next.Index] = map[*loopVariable]loopValue{}
+	}
+	outgoing := loopPruneBindings(w.values, r.live[next.Index], f.aliases, f.deferred.companions)
+	changed := loopJoinBindings(r.inputs[next.Index], outgoing)
+	joined := loopDeferredJoin(r.savedInputs[next.Index], w.deferredBindings, 28)
+	changed = changed || joined != r.savedInputs[next.Index]
+	r.savedInputs[next.Index] = joined
+	// Even an empty state must propagate reachability.
+	return first || changed
+}
+
+// replayContext walks every reachable block once more from its converged
+// entry state, recording each occurrence's effects, launches, calls and
+// literal seeds into the frame.
+func (f *loopFlow) replayContext(r *loopContextRefinement) {
+	frame := r.frame
+	r.literals = map[*ast.FuncLit]map[*loopVariable]loopValue{}
 	summary := loopValue{}
+	r.summary = summary
 	f.effects.summaries[frame] = summary
 	f.effects.frame = frame
 	f.effects.collect = func(access loopDirectAccess) {
 		summary[access.variable] = loopEpochMergeMode(summary[access.variable], access.mode)
 	}
-	for _, block := range graph.Blocks {
-		if inputs[block.Index] == nil {
+	for _, block := range r.graph.Blocks {
+		if r.inputs[block.Index] == nil {
 			continue
 		}
-		w := &loopWalk{values: loopPruneBindings(inputs[block.Index], live[block.Index], f.aliases, f.deferred.companions), aliases: f.aliases, reference: execution, persistentDeferred: plan.persistent, deferredBindings: savedInputs[block.Index]}
+		w := f.contextBlockWalk(r, block)
 		for nodeIndex, node := range block.Nodes {
 			site := frame.sites[block][nodeIndex]
 			f.effects.physical = func(access loopDirectAccess) {
@@ -192,113 +259,139 @@ func (f *loopFlow) refineDeferredContext(body *ast.BlockStmt, seed map[*loopVari
 					frame.effects[point] = append(frame.effects[point], access)
 				}
 			}
-			f.advanceLoopEpoch(node, w, adapter)
-			f.effects.states = nil
-			if execution != nil {
-				trace := *w
-				trace.values = loopCloneValues(w.values)
-				f.effects.states = map[ast.Node]*loopWalk{}
-				f.evaluateDeferredCalls(node, &trace, func(n ast.Node, current *loopWalk) {
-					snapshot := *current
-					snapshot.values = loopCloneValues(current.values)
-					f.effects.states[n] = &snapshot
-				})
-				w.operands = trace.operands
-			}
-			s.recordFlowReachability(node)
-			if _, _, returning := plan.returnInfo(node); returning {
-				plan.recordReturnBefore(node, w, f.effects)
-			} else {
-				f.effects.recordFlowEffects(node, w)
-			}
-			if rng := adapter.entries[node]; rng != nil {
-				if adapter.iteratorEntries[node] {
-					// This abstract execution edge has no physical pre-yield use.
-					sink, collector := f.effects.physical, f.effects.collect
-					// The inlined body supplies this context's execution
-					// summary with its real binding states. The abstract edge
-					// is still needed by source-global capture refinement, not
-					// by the physical or context-local execution collectors.
-					f.effects.physical, f.effects.collect = nil, nil
-					f.effects.iteratorSummary(rng.stmt.X, w)
-					f.effects.physical, f.effects.collect = sink, collector
-				} else {
-					f.effects.rangeInvocation(rng.stmt.X, w)
-				}
-			}
-			if region := adapter.copySteps[node]; region != nil {
-				region.copyReachable = true
-			}
+			f.replayNodeEffects(r, node, w)
 			if goStmt, ok := node.(*ast.GoStmt); ok {
-				environment := w
-				if state := f.effects.states[node]; state != nil {
-					environment = state
-				}
-				targets, opaque := f.invocationContexts(goStmt.Call, environment, false)
-				for _, target := range targets {
-					value := loopSyncOutside(f.effects.summaries[target], target.owner)
-					loopMerge(summary, value)
-					frame.launches = append(frame.launches, loopSyncLaunch{stmt: goStmt, point: site.launch, values: value, target: target})
-				}
-				if opaque {
-					value := f.goPayload(goStmt.Call, environment)
-					loopMerge(summary, value)
-					frame.launches = append(frame.launches, loopSyncLaunch{stmt: goStmt, point: site.launch, values: value})
-				}
+				f.recordContextLaunch(r, site, goStmt, w)
 			}
-			for _, call := range site.calls {
-				if execution != nil && f.effects.states[call.call] == nil {
-					continue // excluded/unevaluated expression, not a fallback call
-				}
-				environment := w
-				if state := f.effects.states[call.call]; state != nil {
-					environment = state
-				}
-				targets, _ := f.invocationContexts(call.call, environment, true)
-				for _, target := range targets {
-					call.target = target
-					frame.calls = append(frame.calls, call)
-				}
-			}
-			s.inspectExecuted(node, func(n ast.Node) bool {
-				if lit, ok := n.(*ast.FuncLit); ok {
-					if execution != nil && f.effects.states[lit] == nil {
-						return false
-					}
-					if literals[lit] == nil {
-						literals[lit] = map[*loopVariable]loopValue{}
-					}
-					needed := map[*loopVariable]bool{}
-					for v := range s.index.captures[lit] {
-						needed[v] = true
-					}
-					values := w.values
-					if state := f.effects.states[lit]; state != nil {
-						values = state.values
-					}
-					loopJoinBindings(literals[lit], loopPruneBindings(values, needed, f.aliases, f.deferred.companions))
-					return false // its body executes in a separate frame
-				}
-				return true
-			})
-			f.transferDeferredNode(plan, node, w, adapter, execution)
+			f.recordContextCalls(r, site, w)
+			f.collectLiteralSeeds(r, node, w)
+			f.transferDeferredNode(r.plan, node, w, r.adapter, frame.execution)
 			if w.values == nil {
 				frame.cutAfter(site.after)
 				break
 			}
-			f.replayDeferredExit(plan, node, w, frame, site)
+			f.replayDeferredExit(r.plan, node, w, frame, site)
 			if w.values == nil {
 				break
 			}
 		}
 	}
-	for lit, entry := range literals {
-		if !adapter.inlinedIterators[lit] {
-			child := f.refineContext(lit.Body, entry, lit, false)
-			frame.constructors = append(frame.constructors, child)
+}
+
+// replayNodeEffects records node's reachability and synchronous effects at
+// the occurrence whose physical sink is installed.
+func (f *loopFlow) replayNodeEffects(r *loopContextRefinement, node ast.Node, w *loopWalk) {
+	adapter, plan := r.adapter, r.plan
+	f.advanceLoopEpoch(node, w, adapter)
+	f.effects.states = nil
+	if r.frame.execution != nil {
+		f.traceOperandStates(node, w)
+	}
+	f.s.recordFlowReachability(node)
+	if _, _, returning := plan.returnInfo(node); returning {
+		plan.recordReturnBefore(node, w, f.effects)
+	} else {
+		f.effects.recordFlowEffects(node, w)
+	}
+	if rng := adapter.entries[node]; rng != nil {
+		if adapter.iteratorEntries[node] {
+			// This abstract execution edge has no physical pre-yield use.
+			sink, collector := f.effects.physical, f.effects.collect
+			// The inlined body supplies this context's execution
+			// summary with its real binding states. The abstract edge
+			// is still needed by source-global capture refinement, not
+			// by the physical or context-local execution collectors.
+			f.effects.physical, f.effects.collect = nil, nil
+			f.effects.iteratorSummary(rng.stmt.X, w)
+			f.effects.physical, f.effects.collect = sink, collector
+		} else {
+			f.effects.rangeInvocation(rng.stmt.X, w)
 		}
 	}
-	return frame
+	if region := adapter.copySteps[node]; region != nil {
+		region.copyReachable = true
+	}
+}
+
+// traceOperandStates evaluates node's operands on a copy of w during deferred
+// replay, keeping each operand's ordered evaluation environment for effects.
+func (f *loopFlow) traceOperandStates(node ast.Node, w *loopWalk) {
+	trace := *w
+	trace.values = loopCloneValues(w.values)
+	f.effects.states = map[ast.Node]*loopWalk{}
+	f.evaluateDeferredCalls(node, &trace, func(n ast.Node, current *loopWalk) {
+		snapshot := *current
+		snapshot.values = loopCloneValues(current.values)
+		f.effects.states[n] = &snapshot
+	})
+	w.operands = trace.operands
+}
+
+// recordContextLaunch adds a go statement's launch events: one per known
+// target context, and its evaluated payload when the callee is opaque.
+func (f *loopFlow) recordContextLaunch(r *loopContextRefinement, site *loopConflictSite, goStmt *ast.GoStmt, w *loopWalk) {
+	frame := r.frame
+	environment := w
+	if state := f.effects.states[goStmt]; state != nil {
+		environment = state
+	}
+	targets, opaque := f.invocationContexts(goStmt.Call, environment, false)
+	for _, target := range targets {
+		value := loopSyncOutside(f.effects.summaries[target], target.owner)
+		loopMerge(r.summary, value)
+		frame.launches = append(frame.launches, loopSyncLaunch{stmt: goStmt, point: site.launch, values: value, target: target})
+	}
+	if opaque {
+		value := f.goPayload(goStmt.Call, environment)
+		loopMerge(r.summary, value)
+		frame.launches = append(frame.launches, loopSyncLaunch{stmt: goStmt, point: site.launch, values: value})
+	}
+}
+
+// recordContextCalls binds each synchronous call at this occurrence to its
+// actual callee contexts.
+func (f *loopFlow) recordContextCalls(r *loopContextRefinement, site *loopConflictSite, w *loopWalk) {
+	for _, call := range site.calls {
+		if r.frame.execution != nil && f.effects.states[call.call] == nil {
+			continue // excluded/unevaluated expression, not a fallback call
+		}
+		environment := w
+		if state := f.effects.states[call.call]; state != nil {
+			environment = state
+		}
+		targets, _ := f.invocationContexts(call.call, environment, true)
+		for _, target := range targets {
+			call.target = target
+			r.frame.calls = append(r.frame.calls, call)
+		}
+	}
+}
+
+// collectLiteralSeeds joins the captured bindings of each literal node
+// constructs into that literal's entry seed.
+func (f *loopFlow) collectLiteralSeeds(r *loopContextRefinement, node ast.Node, w *loopWalk) {
+	f.s.inspectExecuted(node, func(n ast.Node) bool {
+		lit, ok := n.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		if r.frame.execution != nil && f.effects.states[lit] == nil {
+			return false
+		}
+		if r.literals[lit] == nil {
+			r.literals[lit] = map[*loopVariable]loopValue{}
+		}
+		needed := map[*loopVariable]bool{}
+		for v := range f.s.index.captures[lit] {
+			needed[v] = true
+		}
+		values := w.values
+		if state := f.effects.states[lit]; state != nil {
+			values = state.values
+		}
+		loopJoinBindings(r.literals[lit], loopPruneBindings(values, needed, f.aliases, f.deferred.companions))
+		return false // its body executes in a separate frame
+	})
 }
 
 // goPayload copies the callee/argument values at their evaluation boundaries,
@@ -448,15 +541,7 @@ func (a *loopFlowAST) stmt(stmt ast.Stmt) ast.Stmt {
 	case *ast.BlockStmt:
 		return a.block(n)
 	case *ast.LabeledStmt:
-		copy := *n
-		if rng, ok := n.Stmt.(*ast.RangeStmt); ok {
-			if a.rangeLabels == nil {
-				a.rangeLabels = map[*ast.RangeStmt]string{}
-			}
-			a.rangeLabels[rng] = n.Label.Name
-		}
-		copy.Label, copy.Stmt = a.label(n.Label), a.stmt(n.Stmt)
-		return &copy
+		return a.labeledStmt(n)
 	case *ast.BranchStmt:
 		copy := *n
 		copy.Label = a.label(n.Label)
@@ -466,55 +551,9 @@ func (a *loopFlowAST) stmt(stmt ast.Stmt) ast.Stmt {
 		copy.Body, copy.Else = a.block(n.Body), a.stmt(n.Else)
 		return &copy
 	case *ast.ForStmt:
-		copy := *n
-		copy.Body = a.block(n.Body)
-		if a.index != nil {
-			if region := a.index.regions[n]; region != nil && len(region.copies) != 0 {
-				marker := &ast.EmptyStmt{Semicolon: n.For}
-				a.copySteps[marker] = region
-				post := []ast.Stmt{marker}
-				if n.Post != nil {
-					post = append(post, n.Post)
-				}
-				copy.Post = &ast.BlockStmt{List: post}
-			}
-		}
-		return &copy
+		return a.forStmt(n)
 	case *ast.RangeStmt:
-		// Retain RangeStmt (rather than wrapping in a block) so a label on
-		// the range still has the correct break/continue destinations.
-		copy := *n
-		// Plan parents before their callbacks: nested pending returns must run
-		// the inner iterator's false continuation before the outer one's.
-		rng := &loopFlowRange{stmt: n, entry: n.X, key: &loopVariable{}, value: &loopVariable{}}
-		a.planIterator(rng)
-		if rng.iterator != nil || a.iteratorTemplate {
-			rng.entry = loopIteratorEntry(n.X)
-		}
-		copy.Body = a.block(n.Body)
-		// Evaluated X is snapshotted once, before the range header. For the
-		// constant-len exception, an opaque node prevents reads, effects, and
-		// literal-constructor seeds. Keep rng.stmt original for target types
-		// and body-entry assignments, but do not create an evaluation entry.
-		if a.index != nil && !a.index.rangeExpressionEvaluated(n) {
-			copy.X = &ast.BasicLit{ValuePos: n.X.Pos(), Kind: token.INT, Value: "0"}
-		} else {
-			copy.X = rng.entry
-			a.entries[rng.entry] = rng
-		}
-		var lhs []ast.Expr
-		for _, expr := range []ast.Expr{n.Key, n.Value} {
-			if expr != nil {
-				lhs = append(lhs, expr)
-			}
-		}
-		if len(lhs) != 0 {
-			step := &ast.AssignStmt{Lhs: lhs, Tok: token.ASSIGN}
-			a.steps[step] = rng
-			copy.Body.List = append([]ast.Stmt{step}, copy.Body.List...)
-		}
-		copy.Key, copy.Value = nil, nil
-		return &copy
+		return a.rangeStmt(n)
 	case *ast.SwitchStmt:
 		copy := *n
 		copy.Body = a.block(n.Body)
@@ -532,18 +571,90 @@ func (a *loopFlowAST) stmt(stmt ast.Stmt) ast.Stmt {
 		copy.Body = a.block(n.Body)
 		return &copy
 	case *ast.CommClause:
-		copy := *n
-		copy.Body = a.block(&ast.BlockStmt{List: n.Body}).List
-		if channel, selected := a.selectReceive(n.Comm); selected != nil {
-			// cfg evaluates every Comm before choosing an arm. Only the
-			// channel operand belongs there, never the receive or its LHS.
-			evaluation := &ast.ExprStmt{X: channel}
-			a.selectSources[evaluation] = a.selectSources[channel]
-			copy.Comm = evaluation
-			copy.Body = append([]ast.Stmt{selected}, copy.Body...)
-		}
-		return &copy
+		return a.commClause(n)
 	default:
 		return stmt
 	}
+}
+
+func (a *loopFlowAST) labeledStmt(n *ast.LabeledStmt) *ast.LabeledStmt {
+	copy := *n
+	if rng, ok := n.Stmt.(*ast.RangeStmt); ok {
+		if a.rangeLabels == nil {
+			a.rangeLabels = map[*ast.RangeStmt]string{}
+		}
+		a.rangeLabels[rng] = n.Label.Name
+	}
+	copy.Label, copy.Stmt = a.label(n.Label), a.stmt(n.Stmt)
+	return &copy
+}
+
+// forStmt puts a copy-step marker before the post statement of a loop whose
+// region copies per-iteration variables.
+func (a *loopFlowAST) forStmt(n *ast.ForStmt) *ast.ForStmt {
+	copy := *n
+	copy.Body = a.block(n.Body)
+	if a.index != nil {
+		if region := a.index.regions[n]; region != nil && len(region.copies) != 0 {
+			marker := &ast.EmptyStmt{Semicolon: n.For}
+			a.copySteps[marker] = region
+			post := []ast.Stmt{marker}
+			if n.Post != nil {
+				post = append(post, n.Post)
+			}
+			copy.Post = &ast.BlockStmt{List: post}
+		}
+	}
+	return &copy
+}
+
+func (a *loopFlowAST) rangeStmt(n *ast.RangeStmt) *ast.RangeStmt {
+	// Retain RangeStmt (rather than wrapping in a block) so a label on
+	// the range still has the correct break/continue destinations.
+	copy := *n
+	// Plan parents before their callbacks: nested pending returns must run
+	// the inner iterator's false continuation before the outer one's.
+	rng := &loopFlowRange{stmt: n, entry: n.X, key: &loopVariable{}, value: &loopVariable{}}
+	a.planIterator(rng)
+	if rng.iterator != nil || a.iteratorTemplate {
+		rng.entry = loopIteratorEntry(n.X)
+	}
+	copy.Body = a.block(n.Body)
+	// Evaluated X is snapshotted once, before the range header. For the
+	// constant-len exception, an opaque node prevents reads, effects, and
+	// literal-constructor seeds. Keep rng.stmt original for target types
+	// and body-entry assignments, but do not create an evaluation entry.
+	if a.index != nil && !a.index.rangeExpressionEvaluated(n) {
+		copy.X = &ast.BasicLit{ValuePos: n.X.Pos(), Kind: token.INT, Value: "0"}
+	} else {
+		copy.X = rng.entry
+		a.entries[rng.entry] = rng
+	}
+	var lhs []ast.Expr
+	for _, expr := range []ast.Expr{n.Key, n.Value} {
+		if expr != nil {
+			lhs = append(lhs, expr)
+		}
+	}
+	if len(lhs) != 0 {
+		step := &ast.AssignStmt{Lhs: lhs, Tok: token.ASSIGN}
+		a.steps[step] = rng
+		copy.Body.List = append([]ast.Stmt{step}, copy.Body.List...)
+	}
+	copy.Key, copy.Value = nil, nil
+	return &copy
+}
+
+func (a *loopFlowAST) commClause(n *ast.CommClause) *ast.CommClause {
+	copy := *n
+	copy.Body = a.block(&ast.BlockStmt{List: n.Body}).List
+	if channel, selected := a.selectReceive(n.Comm); selected != nil {
+		// cfg evaluates every Comm before choosing an arm. Only the
+		// channel operand belongs there, never the receive or its LHS.
+		evaluation := &ast.ExprStmt{X: channel}
+		a.selectSources[evaluation] = a.selectSources[channel]
+		copy.Comm = evaluation
+		copy.Body = append([]ast.Stmt{selected}, copy.Body...)
+	}
+	return &copy
 }
