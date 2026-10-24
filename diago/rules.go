@@ -34,6 +34,10 @@ type RuleDescriptor struct {
 }
 
 var ruleCatalog = map[string]RuleDescriptor{
+	"iterator-analysis-incomplete": {
+		ID: "iterator-analysis-incomplete", Kind: "analysis", Source: "native", DefaultEnabled: true,
+		Severity: "medium", FixSafety: FixSafetyNone, Summary: "Iterator expansion exceeded the analysis budget; loop findings may be incomplete.",
+	},
 	"sql-rows-err": {
 		ID: "sql-rows-err", Kind: "correctness", Source: "native", SinceGo: "1.0", DefaultEnabled: true,
 		Severity: "high", FixSafety: FixSafetyNone, Summary: "Check sql.Rows.Err after iteration.",

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"golang.org/x/tools/go/gcexportdata"
@@ -32,27 +33,26 @@ type ASTFinding struct {
 }
 
 type goListPackage struct {
-	ImportPath   string   `json:"ImportPath"`
-	Name         string   `json:"Name"`
-	Dir          string   `json:"Dir"`
-	Export       string   `json:"Export"`
-	GoFiles      []string `json:"GoFiles"`
-	TestGoFiles  []string `json:"TestGoFiles"`
-	XTestGoFiles []string `json:"XTestGoFiles"`
-	exports      map[string]string
-	ownedFields  map[string]map[string]bool
+	ImportPath      string                      `json:"ImportPath"`
+	Name            string                      `json:"Name"`
+	Dir             string                      `json:"Dir"`
+	Export          string                      `json:"Export"`
+	GoFiles         []string                    `json:"GoFiles"`
+	CgoFiles        []string                    `json:"CgoFiles"`
+	CompiledGoFiles []string                    `json:"CompiledGoFiles"`
+	ForTest         string                      `json:"ForTest"`
+	TestGoFiles     []string                    `json:"TestGoFiles"`
+	XTestGoFiles    []string                    `json:"XTestGoFiles"`
+	Module          *struct{ GoVersion string } `json:"Module"`
+	GoVersion       string                      `json:"-"`
+	exports         map[string]string
+	testExports     map[string]string // sparse test-variant overrides over exports
+	importOverrides map[string]string
+	goArch          string
+	ownedFields     map[string]map[string]bool
 }
 
-type packageStats struct {
-	importPath string
-	files      int
-	funcs      int
-}
-
-const (
-	largePackageFileLimit = 50
-	largePackageFuncLimit = 1000
-)
+const largeFileLineLimit = 5000
 
 type astContext struct {
 	pkg       goListPackage
@@ -83,14 +83,12 @@ func AnalyzeAST(workDir, target string) ([]ASTFinding, error) {
 	var findings []ASTFinding
 	for _, pkg := range pkgs {
 		pkg.ownedFields = ownedFields
-		stats := analyzePackage(&findings, pkg)
-		appendLargePackageFinding(&findings, pkg.Dir, stats)
+		analyzePackage(&findings, pkg)
 	}
 	return findings, nil
 }
 
-func analyzePackage(findings *[]ASTFinding, pkg goListPackage) packageStats {
-	stats := packageStats{importPath: pkg.ImportPath}
+func analyzePackage(findings *[]ASTFinding, pkg goListPackage) {
 	signals := newPackageSignals(pkg)
 	files := append(append([]string{}, pkg.GoFiles...), pkg.TestGoFiles...)
 	files = append(files, pkg.XTestGoFiles...)
@@ -106,27 +104,53 @@ func analyzePackage(findings *[]ASTFinding, pkg goListPackage) packageStats {
 		}
 		parsedFiles[file] = parsed
 	}
+	// Cgo's compiler-generated inputs carry declarations needed by ordinary Go
+	// files. They participate in type checking, but are not audited as source.
+	for _, file := range compilerExtraFiles(pkg) {
+		path := packageFilePath(pkg, file)
+		parsed, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err == nil {
+			parsedFiles[file] = parsed
+		}
+	}
 	typeInfo := checkPackageTypes(pkg, fset, parsedFiles)
 	if typeInfo == nil {
 		loc := astLocation{pkg: pkg.ImportPath, file: pkg.Dir, line: 1}
-		msg := "type checking unavailable (export-data skew?); type-dependent rules skipped"
-		*findings = append(*findings, astFinding("type-info-unavailable", "high", loc, "", msg))
+		msg := "type checking unavailable (type errors or export-data/toolchain skew); type-dependent rules skipped"
+		*findings = append(*findings, astFinding("type-info-unavailable", "medium", loc, "", msg))
+	}
+	testInfos := checkTestTypes(pkg, fset, parsedFiles)
+	warnedTestGroups := map[string]bool{}
+	for _, file := range files {
+		if info, ok := testInfos[file]; ok && info == nil {
+			group := parsedFiles[file].Name.Name
+			if !warnedTestGroups[group] {
+				loc := astLocation{pkg: pkg.ImportPath, file: filepath.Join(pkg.Dir, file), line: 1}
+				msg := "test type checking unavailable (type errors or export-data/toolchain skew); type-dependent rules skipped"
+				*findings = append(*findings, astFinding("type-info-unavailable", "medium", loc, "", msg))
+				warnedTestGroups[group] = true
+			}
+		}
 	}
 	releases := collectReleaseParams(parsedFiles, pkg.GoFiles)
 	cancelers := collectCancelParams(pkg.ImportPath, parsedFiles, pkg.GoFiles, typeInfo)
 	params := analyzePackageFileParams{
 		pkg: pkg, fset: fset, typeInfo: typeInfo, releases: releases, cancelers: cancelers,
-		stats: &stats, signals: signals,
+		signals: signals,
 	}
 	for _, file := range files {
 		if parsed := parsedFiles[file]; parsed != nil {
 			params.file = file
 			params.parsed = parsed
+			if info, ok := testInfos[file]; ok {
+				params.typeInfo = info
+			} else {
+				params.typeInfo = typeInfo
+			}
 			analyzePackageFile(findings, params)
 		}
 	}
 	appendPackageSignalFindings(findings, pkg, signals)
-	return stats
 }
 
 type analyzePackageFileParams struct {
@@ -137,13 +161,12 @@ type analyzePackageFileParams struct {
 	typeInfo  *types.Info
 	releases  map[string]map[int]bool
 	cancelers map[string]map[int]bool
-	stats     *packageStats
 	signals   *packageSignals
 }
 
 func analyzePackageFile(findings *[]ASTFinding, params analyzePackageFileParams) {
 	path := filepath.Join(params.pkg.Dir, params.file)
-	// A //diago:ignore file is excluded entirely: no findings, signals, or stats.
+	// A //diago:ignore file is excluded entirely: no findings or signals.
 	if isIgnoredFile(params.parsed) {
 		return
 	}
@@ -156,10 +179,6 @@ func analyzePackageFile(findings *[]ASTFinding, params analyzePackageFileParams)
 		fset: params.fset, file: params.parsed, types: params.typeInfo, releases: params.releases,
 		cancelers: params.cancelers,
 	}
-	// large-package weighs production code only, so tests don't inflate the count.
-	if !isTest && !generated {
-		params.stats.files++
-	}
 	appendLargeFileFinding(findings, ctx, lineCount)
 	findCommentDebt(findings, params.pkg.ImportPath, path, params.fset, params.parsed)
 
@@ -169,50 +188,120 @@ func analyzePackageFile(findings *[]ASTFinding, params analyzePackageFileParams)
 		if !ok || fn.Body == nil {
 			continue
 		}
-		if !isTest && !generated {
-			params.stats.funcs++
-		}
 		analyzeFunc(findings, ctx, fn)
 	}
 }
 
-func checkPackageTypes(pkg goListPackage, fset *token.FileSet, parsed map[string]*ast.File) *types.Info {
-	files := make([]*ast.File, 0, len(pkg.GoFiles))
-	for _, name := range pkg.GoFiles {
-		if file := parsed[name]; file != nil {
-			files = append(files, file)
+func checkTestTypes(pkg goListPackage, fset *token.FileSet, parsed map[string]*ast.File) map[string]*types.Info {
+	out := map[string]*types.Info{}
+	groups := map[string][]string{}
+	for _, name := range append(append([]string{}, pkg.TestGoFiles...), pkg.XTestGoFiles...) {
+		file := parsed[name]
+		if file == nil {
+			continue
+		}
+		groups[file.Name.Name] = append(groups[file.Name.Name], name)
+	}
+	for group, names := range groups {
+		checkPkg := pkg
+		checkPkg.importOverrides = pkg.testExports
+		checkNames := append([]string{}, names...)
+		if group == pkg.Name {
+			// Internal tests share a package scope with production declarations.
+			checkNames = append(append([]string{}, pkg.GoFiles...), names...)
+		} else {
+			checkPkg.ImportPath += "_test"
+			checkPkg.CompiledGoFiles = nil
+		}
+		info := checkFilesTypes(checkPkg, fset, parsed, checkNames)
+		for _, name := range names {
+			// Retain nil entries: production info cannot describe test AST nodes.
+			out[name] = info
 		}
 	}
-	newInfo := func() *types.Info {
-		return &types.Info{
-			Types:      make(map[ast.Expr]types.TypeAndValue),
-			Defs:       make(map[*ast.Ident]types.Object),
-			Uses:       make(map[*ast.Ident]types.Object),
-			Selections: make(map[*ast.SelectorExpr]*types.Selection),
+	return out
+}
+
+func checkFilesTypes(pkg goListPackage, fset *token.FileSet, parsed map[string]*ast.File, names []string) *types.Info {
+	names = append(append([]string{}, names...), compilerExtraFiles(pkg)...)
+	files := make([]*ast.File, 0, len(names))
+	for _, name := range names {
+		file := parsed[name]
+		if file == nil {
+			return nil
 		}
+		files = append(files, file)
 	}
 	if len(files) == 0 {
-		return newInfo()
+		return newTypesInfo()
+	}
+	version := ""
+	if pkg.GoVersion != "" {
+		version = "go" + strings.TrimPrefix(pkg.GoVersion, "go")
+	}
+	arch := pkg.goArch
+	if arch == "" {
+		arch = runtime.GOARCH
 	}
 	conf := types.Config{
-		Importer: &exportDataImporter{fset: fset, exports: pkg.exports, imports: make(map[string]*types.Package)},
-		Error:    func(error) {},
+		Importer:  &exportDataImporter{fset: fset, exports: pkg.exports, overrides: pkg.importOverrides, imports: make(map[string]*types.Package)},
+		Error:     func(error) {},
+		GoVersion: version,
+		Sizes:     types.SizesFor("gc", arch),
 	}
-	info := newInfo()
+	info := newTypesInfo()
 	if detail := tryTypeCheck(&conf, pkg.ImportPath, fset, files, info); detail != nil {
-		fmt.Fprintf(os.Stderr, "diago: type info unavailable for %s: %v\n", pkg.ImportPath, detail)
 		return nil
 	}
 	return info
+}
+
+func packageFilePath(pkg goListPackage, name string) string {
+	if filepath.IsAbs(name) {
+		return name
+	}
+	return filepath.Join(pkg.Dir, name)
+}
+
+func compilerExtraFiles(pkg goListPackage) []string {
+	source := map[string]bool{}
+	for _, names := range [][]string{pkg.GoFiles, pkg.TestGoFiles, pkg.XTestGoFiles} {
+		for _, name := range names {
+			source[packageFilePath(pkg, name)] = true
+		}
+	}
+	var extra []string
+	for _, name := range pkg.CompiledGoFiles {
+		if !source[packageFilePath(pkg, name)] {
+			extra = append(extra, name)
+			source[packageFilePath(pkg, name)] = true
+		}
+	}
+	return extra
+}
+
+func newTypesInfo() *types.Info {
+	return &types.Info{
+		Types:        make(map[ast.Expr]types.TypeAndValue),
+		Defs:         make(map[*ast.Ident]types.Object),
+		Uses:         make(map[*ast.Ident]types.Object),
+		Selections:   make(map[*ast.SelectorExpr]*types.Selection),
+		FileVersions: make(map[*ast.File]string),
+	}
+}
+
+func checkPackageTypes(pkg goListPackage, fset *token.FileSet, parsed map[string]*ast.File) *types.Info {
+	return checkFilesTypes(pkg, fset, parsed, pkg.GoFiles)
 }
 
 // exportDataImporter uses the current x/tools decoder, rather than the
 // standard-library importer bundled with the Go version that built Diago.
 // This lets Diago inspect export data written by a newer target toolchain.
 type exportDataImporter struct {
-	fset    *token.FileSet
-	exports map[string]string
-	imports map[string]*types.Package
+	fset      *token.FileSet
+	exports   map[string]string
+	overrides map[string]string // test-variant export data, preferred over exports
+	imports   map[string]*types.Package
 }
 
 func (imp *exportDataImporter) Import(path string) (*types.Package, error) {
@@ -222,7 +311,10 @@ func (imp *exportDataImporter) Import(path string) (*types.Package, error) {
 	if pkg := imp.imports[path]; pkg != nil && pkg.Complete() {
 		return pkg, nil
 	}
-	export := imp.exports[path]
+	export := imp.overrides[path]
+	if export == "" {
+		export = imp.exports[path]
+	}
 	if export == "" {
 		return nil, fmt.Errorf("no export data for %s", path)
 	}
@@ -242,7 +334,9 @@ func (imp *exportDataImporter) Import(path string) (*types.Package, error) {
 	return pkg, nil
 }
 
-// tryTypeCheck converts export-data skew panics into a value; re-raises the rest.
+// tryTypeCheck returns type errors and export-data skew panics as values;
+// unexpected panics are re-raised. Partial information must not be used as if
+// every identifier and expression had been successfully checked.
 func tryTypeCheck(conf *types.Config, importPath string, fset *token.FileSet, files []*ast.File, info *types.Info) (skewDetail any) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -253,7 +347,10 @@ func tryTypeCheck(conf *types.Config, importPath string, fset *token.FileSet, fi
 			panic(r)
 		}
 	}()
-	_, _ = conf.Check(importPath, fset, files, info)
+	_, err := conf.Check(importPath, fset, files, info)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -273,12 +370,12 @@ func isImporterSkewPanic(r any) bool {
 }
 
 func appendLargeFileFinding(findings *[]ASTFinding, ctx astContext, lineCount int) {
-	if ctx.generated || ctx.isTest || lineCount <= 1000 {
+	if ctx.generated || ctx.isTest || lineCount <= largeFileLineLimit {
 		return
 	}
 	loc := astLocation{pkg: ctx.pkg.ImportPath, file: ctx.path, line: 1}
 	msg := fmt.Sprintf("file has %d lines", lineCount)
-	*findings = append(*findings, astFinding("large-file", severity(lineCount, 500, 1000, 1500), loc, "", msg))
+	*findings = append(*findings, astFinding("large-file", severity(lineCount, largeFileLineLimit/2, largeFileLineLimit, largeFileLineLimit*3/2), loc, "", msg))
 }
 
 func isGeneratedFile(path string, file *ast.File) bool {
@@ -460,17 +557,6 @@ func filterSkippedFindings(findings []ASTFinding, workDir string, includeGenerat
 	return kept
 }
 
-func appendLargePackageFinding(findings *[]ASTFinding, dir string, stats packageStats) {
-	// Total lines are covered by large-file (1k per file) plus the file count, so
-	// the package only weighs file and function counts here.
-	if stats.files <= largePackageFileLimit && stats.funcs <= largePackageFuncLimit {
-		return
-	}
-	loc := astLocation{pkg: stats.importPath, file: dir, line: 1}
-	msg := fmt.Sprintf("package has %d files and %d funcs", stats.files, stats.funcs)
-	*findings = append(*findings, astFinding("large-package", "medium", loc, "", msg))
-}
-
 func listPackages(workDir, target string) ([]goListPackage, error) {
 	cmd := exec.Command("go", "list", "-json", target)
 	cmd.Dir = workDir
@@ -488,17 +574,62 @@ func listPackages(workDir, target string) ([]goListPackage, error) {
 		if err := dec.Decode(&pkg); err != nil {
 			return nil, err
 		}
+		if pkg.Module != nil {
+			pkg.GoVersion = pkg.Module.GoVersion
+			if pkg.GoVersion == "" {
+				pkg.GoVersion = "1.16" // go.mod's default when no go directive exists.
+			}
+		}
 		pkgs = append(pkgs, pkg)
 	}
-	exports := listExportFiles(workDir, target)
+	envCmd := exec.Command("go", "env", "-json", "GOARCH", "GOVERSION")
+	envCmd.Dir = workDir
+	envJSON, err := envCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go env target: %w", err)
+	}
+	var targetEnv struct{ GOARCH, GOVERSION string }
+	if err := json.Unmarshal(envJSON, &targetEnv); err != nil {
+		return nil, fmt.Errorf("decoding go env target: %w", err)
+	}
+	compiled := listExportPackages(workDir, target)
+	exports := make(map[string]string)
+	production := make(map[string]goListPackage)
+	testOverrides := make(map[string]map[string]string)
+	for _, pkg := range compiled {
+		if pkg.ForTest == "" {
+			production[pkg.ImportPath] = pkg
+			if pkg.Export != "" {
+				exports[pkg.ImportPath] = pkg.Export
+			}
+		} else if pkg.Export != "" {
+			if testOverrides[pkg.ForTest] == nil {
+				testOverrides[pkg.ForTest] = make(map[string]string)
+			}
+			// Archives retain canonical paths, unlike synthetic go-list IDs.
+			path, _, _ := strings.Cut(pkg.ImportPath, " [")
+			testOverrides[pkg.ForTest][path] = pkg.Export
+		}
+	}
 	for i := range pkgs {
+		pkgs[i].goArch = targetEnv.GOARCH
+		if pkgs[i].Module == nil {
+			// GOPATH and standard-library packages use the selected toolchain's
+			// language version rather than a module's go directive.
+			version := strings.TrimPrefix(targetEnv.GOVERSION, "go")
+			if validGoVersion(version) {
+				pkgs[i].GoVersion = version
+			}
+		}
 		pkgs[i].exports = exports
+		pkgs[i].testExports = testOverrides[pkgs[i].ImportPath]
+		pkgs[i].CompiledGoFiles = production[pkgs[i].ImportPath].CompiledGoFiles
 	}
 	return pkgs, nil
 }
 
-func listExportFiles(workDir, target string) map[string]string {
-	cmd := exec.Command("go", "list", "-e", "-deps", "-export", "-json", target)
+func listExportPackages(workDir, target string) []goListPackage {
+	cmd := exec.Command("go", "list", "-e", "-deps", "-test", "-compiled", "-export", "-json", target)
 	cmd.Dir = workDir
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -506,17 +637,15 @@ func listExportFiles(workDir, target string) map[string]string {
 		return nil
 	}
 	dec := json.NewDecoder(bytes.NewReader(out.Bytes()))
-	exports := make(map[string]string)
+	var pkgs []goListPackage
 	for dec.More() {
 		var pkg goListPackage
 		if err := dec.Decode(&pkg); err != nil {
 			return nil
 		}
-		if pkg.Export != "" {
-			exports[pkg.ImportPath] = pkg.Export
-		}
+		pkgs = append(pkgs, pkg)
 	}
-	return exports
+	return pkgs
 }
 
 func analyzeFunc(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl) {
@@ -527,7 +656,24 @@ func analyzeFunc(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl) {
 		appendFunctionMetricFindings(findings, ctx, fn, name)
 	}
 	findDangerousCalls(findings, ctx, fn, name)
-	findLoopHazards(findings, loopContext{pkg: ctx.pkg.ImportPath, path: ctx.path, fset: ctx.fset, fn: name}, fn.Body, 0)
+	scanLoops(loopEnv{findings: findings, ctx: loopContext{pkg: ctx.pkg.ImportPath, path: ctx.path, fset: ctx.fset, fn: name, types: ctx.types, file: ctx.file, decl: fn, goVersion: sourceGoVersion(ctx)}, shade: map[string]bool{}}, fn.Body)
+}
+
+// sourceGoVersion follows go/types' per-file language version rules, including
+// build constraints that opt a file into (or out of) Go 1.22 loop semantics.
+func sourceGoVersion(ctx astContext) string {
+	if ctx.file != nil {
+		if ctx.types != nil && ctx.types.FileVersions[ctx.file] != "" {
+			return ctx.types.FileVersions[ctx.file]
+		}
+		if ctx.file.GoVersion != "" {
+			if goVersionAtLeast(ctx.file.GoVersion, "1.21") {
+				return ctx.file.GoVersion
+			}
+			return "1.21"
+		}
+	}
+	return ctx.pkg.GoVersion
 }
 
 func appendLongTestNameFinding(findings *[]ASTFinding, ctx astContext, fn *ast.FuncDecl, name string) {
@@ -749,51 +895,6 @@ func isNestingNode(n ast.Node) bool {
 	}
 }
 
-type loopContext struct {
-	pkg  string
-	path string
-	fset *token.FileSet
-	fn   string
-}
-
-func findLoopHazards(findings *[]ASTFinding, ctx loopContext, n ast.Node, loopDepth int) {
-	ast.Inspect(n, func(child ast.Node) bool {
-		if child == nil || child == n {
-			return true
-		}
-		if body, ok := loopBody(child); ok {
-			findLoopHazards(findings, ctx, body, loopDepth+1)
-			return false
-		}
-		appendLoopHazard(findings, ctx, child, loopDepth)
-		return true
-	})
-}
-
-func loopBody(n ast.Node) (*ast.BlockStmt, bool) {
-	switch x := n.(type) {
-	case *ast.ForStmt:
-		return x.Body, true
-	case *ast.RangeStmt:
-		return x.Body, true
-	default:
-		return nil, false
-	}
-}
-
-func appendLoopHazard(findings *[]ASTFinding, ctx loopContext, n ast.Node, loopDepth int) {
-	if loopDepth == 0 {
-		return
-	}
-	loc := astLocation{pkg: ctx.pkg, file: ctx.path, line: ctx.fset.Position(n.Pos()).Line}
-	switch n.(type) {
-	case *ast.DeferStmt:
-		*findings = append(*findings, astFinding("defer-in-loop", "high", loc, ctx.fn, "defer inside loop can delay resource release"))
-	case *ast.GoStmt:
-		*findings = append(*findings, astFinding("goroutine-in-loop", "high", loc, ctx.fn, "goroutine launched inside loop"))
-	}
-}
-
 func findCommentDebt(findings *[]ASTFinding, pkg, path string, fset *token.FileSet, file *ast.File) {
 	for _, group := range file.Comments {
 		for _, c := range group.List {
@@ -822,6 +923,9 @@ func commentDebtMarker(text string) (string, bool) {
 }
 
 func astFinding(rule, sev string, loc astLocation, symbol, msg string) ASTFinding {
+	if descriptor, ok := ruleCatalog[rule]; ok && descriptor.Kind == "analysis" {
+		sev = descriptor.Severity
+	}
 	return ASTFinding{Rule: rule, Severity: sev, Package: loc.pkg, File: loc.file, Line: loc.line, Symbol: symbol, Message: msg}
 }
 
@@ -880,5 +984,9 @@ func fileLineCount(path string) int {
 	if err != nil || len(data) == 0 {
 		return 0
 	}
-	return bytes.Count(data, []byte("\n")) + 1
+	lines := bytes.Count(data, []byte("\n"))
+	if data[len(data)-1] != '\n' {
+		lines++
+	}
+	return lines
 }

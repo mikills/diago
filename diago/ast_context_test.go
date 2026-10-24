@@ -151,7 +151,7 @@ func (*Runner) ExecuteAndFetchContext(context.Context) error { return nil }
 	}
 }
 
-func TestBackgroundContextRecognizesBoundedAndOwnedRoots(t *testing.T) {
+func TestBgCtxRoots(t *testing.T) {
 	findings := contextFindings(t, `package sample
 import (
 	"context"
@@ -265,7 +265,7 @@ func UnclosedCancel() {
 	}
 }
 
-func TestBackgroundContextMainAndRuleDirectives(t *testing.T) {
+func TestBgCtxMain(t *testing.T) {
 	findings := contextFindings(t, `package main
 import "context"
 func main() {
@@ -308,7 +308,7 @@ func detached() {
 	}
 }
 
-func TestBackgroundContextConvenienceWrapperScope(t *testing.T) {
+func TestBgCtxWrapper(t *testing.T) {
 	findings := contextFindings(t, `package sample
 import "context"
 type Runner struct{}

@@ -37,7 +37,7 @@ func newTypeInfo() *types.Info {
 	}
 }
 
-func TestTryTypeCheckRecoversImporterSkew(t *testing.T) {
+func TestTypeSkew(t *testing.T) {
 	skew := `cannot decode "context", export data version 4 is greater than maximum supported version 2`
 	payloads := []any{skew, errors.New(skew)}
 	for _, payload := range payloads {
@@ -50,7 +50,7 @@ func TestTryTypeCheckRecoversImporterSkew(t *testing.T) {
 	}
 }
 
-func TestTryTypeCheckRepanicsUnknownPanic(t *testing.T) {
+func TestTypeUnknownPanic(t *testing.T) {
 	fset, files := parseTypeCheckFixture(t, "package p\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n")
 	conf := &types.Config{Importer: panicImporter{payload: "boom"}}
 	defer func() {
@@ -63,7 +63,7 @@ func TestTryTypeCheckRepanicsUnknownPanic(t *testing.T) {
 	t.Fatal("tryTypeCheck did not re-panic")
 }
 
-func TestTryTypeCheckCleanCheckReturnsNil(t *testing.T) {
+func TestTypeCleanNil(t *testing.T) {
 	fset, files := parseTypeCheckFixture(t, "package p\n\nfunc F() int { return 1 }\n")
 	conf := &types.Config{Importer: importer.Default()}
 	if got := tryTypeCheck(conf, "example.com/p", fset, files, newTypeInfo()); got != nil {
@@ -85,7 +85,12 @@ func TestCheckPackageTypesReadsTargetToolchainExports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exports := listExportFiles(t.TempDir(), "fmt")
+	exports := make(map[string]string)
+	for _, listed := range listExportPackages(t.TempDir(), "fmt") {
+		if listed.ForTest == "" && listed.Export != "" {
+			exports[listed.ImportPath] = listed.Export
+		}
+	}
 	if exports["fmt"] == "" {
 		t.Fatal("go list did not return fmt export data")
 	}

@@ -21,7 +21,7 @@ func writeBaseline(t *testing.T, report AuditReport) string {
 	return path
 }
 
-func TestApplyBaselineDropsKnownIgnoringLine(t *testing.T) {
+func TestBaseDropKnown(t *testing.T) {
 	path := writeBaseline(t, AuditReport{ASTFindings: []ASTFinding{
 		{Rule: "cyclomatic-complexity", File: "a.go", Symbol: "Foo", Message: "complex", Severity: "high", Line: 10},
 	}})
@@ -47,7 +47,7 @@ func TestApplyBaselineDropsKnownIgnoringLine(t *testing.T) {
 	}
 }
 
-func TestApplyBaselineGatesNewCriticalsOnly(t *testing.T) {
+func TestBaseGateCritical(t *testing.T) {
 	crit := ASTFinding{Rule: "large-file", File: "huge.go", Message: "5000 lines", Severity: "critical", Line: 1}
 	path := writeBaseline(t, AuditReport{ASTFindings: []ASTFinding{crit}})
 
@@ -76,7 +76,7 @@ func TestApplyBaselineGatesNewCriticalsOnly(t *testing.T) {
 	}
 }
 
-func TestApplyBaselineKeepsCommandFailures(t *testing.T) {
+func TestBaseKeepsFailures(t *testing.T) {
 	path := writeBaseline(t, AuditReport{})
 	report := &AuditReport{Checks: []AuditCheck{
 		{Name: "test", Passed: false}, // a real test failure, unrelated to findings
