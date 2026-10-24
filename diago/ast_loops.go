@@ -308,122 +308,125 @@ func (x *loopIndex) node(n ast.Node) {
 	}
 	x.recordLocation(n)
 	switch n := n.(type) {
+	case ast.Expr:
+		x.expressionNode(n)
+	case ast.Stmt:
+		x.statementNode(n)
+	case *ast.ValueSpec:
+		x.valueSpecNode(n)
+	case *ast.TypeSpec:
+		// Type names need identities for shadowing, but fields are not uses.
+		if v := x.define(n.Name); v != nil {
+			v.typeExpr = n.Type
+		}
+	default:
+		loopChildren(n, x.node)
+	}
+}
+
+func (x *loopIndex) expressionNode(n ast.Expr) {
+	switch n := n.(type) {
 	case *ast.Ident:
 		x.access(n, loopRead)
 	case *ast.StarExpr:
 		x.readPointee(n.X)
 	case *ast.IndexExpr:
-		x.resolveOperand(n.X)
-		probe := &loopScanner{env: loopEnv{ctx: x.ctx}, index: x}
-		if probe.referenceIndex(n.X) {
-			x.readPointee(n.X)
-		} else {
-			x.node(n.X)
-		}
-		x.node(n.Index)
+		x.indexExprNode(n)
 	case *ast.UnaryExpr:
 		if n.Op == token.AND {
 			x.addressOperand(n.X)
 		} else {
 			x.node(n.X)
 		}
-	case *ast.GoStmt:
-		x.callOperands(n.Call)
-	case *ast.DeferStmt:
-		x.callOperands(n.Call)
 	case *ast.CallExpr:
 		x.callOperands(n)
 		x.markInvocation(n.Fun)
 	case *ast.SelectorExpr:
-		x.resolveOperand(n.X)
-		probe := &loopScanner{env: loopEnv{ctx: x.ctx}, index: x}
-		if probe.receiverImplicitAddress(n) {
-			// Binding s.M to a pointer receiver computes &s; it does not
-			// copy s. Invocation activates the receiver's data read later.
-			x.addressOperand(n.X)
-		} else if hint := probe.methodReceiverHint(n); hint.known && hint.pointerReceiver {
-			x.methodReceiverPathOperand(n, hint)
-		} else if probe.methodCopiesPointee(n) {
-			x.readPointee(n.X) // Value receivers copy the final receiver's data.
-		} else if hint := probe.fieldReceiverHint(n); hint.field && hint.throughPointer {
-			x.fieldPathOperand(n, hint, loopRead)
-		} else {
-			x.node(n.X)
-		}
+		x.selectorExprNode(n)
 	case *ast.CompositeLit:
-		isMap := x.mapLiteral(n)
-		for _, elt := range n.Elts {
-			if kv, ok := elt.(*ast.KeyValueExpr); ok {
-				if isMap {
-					x.node(kv.Key)
-				}
-				x.node(kv.Value)
-			} else {
-				x.node(elt)
+		x.compositeLitNode(n)
+	case *ast.StructType, *ast.InterfaceType, *ast.FuncType:
+		// Field, method, and parameter names in types are not references.
+	case *ast.FuncLit:
+		x.funcLitNode(n)
+	default:
+		loopChildren(n, x.node)
+	}
+}
+
+func (x *loopIndex) indexExprNode(n *ast.IndexExpr) {
+	x.resolveOperand(n.X)
+	probe := &loopScanner{env: loopEnv{ctx: x.ctx}, index: x}
+	if probe.referenceIndex(n.X) {
+		x.readPointee(n.X)
+	} else {
+		x.node(n.X)
+	}
+	x.node(n.Index)
+}
+
+func (x *loopIndex) selectorExprNode(n *ast.SelectorExpr) {
+	x.resolveOperand(n.X)
+	probe := &loopScanner{env: loopEnv{ctx: x.ctx}, index: x}
+	if probe.receiverImplicitAddress(n) {
+		// Binding s.M to a pointer receiver computes &s; it does not
+		// copy s. Invocation activates the receiver's data read later.
+		x.addressOperand(n.X)
+	} else if hint := probe.methodReceiverHint(n); hint.known && hint.pointerReceiver {
+		x.methodReceiverPathOperand(n, hint)
+	} else if probe.methodCopiesPointee(n) {
+		x.readPointee(n.X) // Value receivers copy the final receiver's data.
+	} else if hint := probe.fieldReceiverHint(n); hint.field && hint.throughPointer {
+		x.fieldPathOperand(n, hint, loopRead)
+	} else {
+		x.node(n.X)
+	}
+}
+
+func (x *loopIndex) compositeLitNode(n *ast.CompositeLit) {
+	isMap := x.mapLiteral(n)
+	for _, elt := range n.Elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			if isMap {
+				x.node(kv.Key)
 			}
+			x.node(kv.Value)
+		} else {
+			x.node(elt)
 		}
+	}
+}
+
+func (x *loopIndex) funcLitNode(n *ast.FuncLit) {
+	x.pushScope()
+	x.lits = append(x.lits, n)
+	x.captures[n] = map[*loopVariable]loopAccess{}
+	x.fields(n.Type.Params)
+	x.fields(n.Type.Results)
+	// Parameters and the outermost body share a short-declaration scope.
+	for _, stmt := range n.Body.List {
+		x.node(stmt)
+	}
+	x.lits = x.lits[:len(x.lits)-1]
+	x.scope = x.scope.parent
+}
+
+// statementNode handles simple statements and loops. Blocks, conditionals,
+// switches, and their clauses go to blockNode.
+func (x *loopIndex) statementNode(n ast.Stmt) {
+	switch n := n.(type) {
+	case *ast.GoStmt:
+		x.callOperands(n.Call)
+	case *ast.DeferStmt:
+		x.callOperands(n.Call)
 	case *ast.BranchStmt:
 		// Labels live in a separate namespace.
 	case *ast.LabeledStmt:
 		x.node(n.Stmt)
-	case *ast.StructType, *ast.InterfaceType, *ast.FuncType:
-		// Field, method, and parameter names in types are not references.
-	case *ast.BlockStmt:
-		x.pushScope()
-		for _, stmt := range n.List {
-			x.node(stmt)
-		}
-		x.scope = x.scope.parent
-	case *ast.FuncLit:
-		x.pushScope()
-		x.lits = append(x.lits, n)
-		x.captures[n] = map[*loopVariable]loopAccess{}
-		x.fields(n.Type.Params)
-		x.fields(n.Type.Results)
-		// Parameters and the outermost body share a short-declaration scope.
-		for _, stmt := range n.Body.List {
-			x.node(stmt)
-		}
-		x.lits = x.lits[:len(x.lits)-1]
-		x.scope = x.scope.parent
 	case *ast.AssignStmt:
-		for _, rhs := range n.Rhs {
-			x.node(rhs)
-		}
-		for i, lhs := range n.Lhs {
-			if id, ok := lhs.(*ast.Ident); ok && n.Tok == token.DEFINE && x.scope.vars[id.Name] == nil {
-				if v := x.define(id); v != nil && len(n.Rhs) == len(n.Lhs) {
-					v.valueInitializer = n.Rhs[i]
-					v.valueInitializerKnown = true
-				}
-			} else {
-				mode := loopWrite
-				if n.Tok != token.ASSIGN && n.Tok != token.DEFINE {
-					mode |= loopRead
-				}
-				x.lhs(lhs, mode)
-			}
-		}
+		x.assignStmtNode(n)
 	case *ast.IncDecStmt:
 		x.lhs(n.X, loopRead|loopWrite)
-	case *ast.ValueSpec:
-		for _, value := range n.Values {
-			x.node(value)
-		}
-		for i, id := range n.Names {
-			if v := x.define(id); v != nil {
-				v.typeExpr = n.Type
-				if i < len(n.Values) {
-					v.valueInitializer = n.Values[i]
-					v.valueInitializerKnown = true
-				}
-			}
-		}
-	case *ast.TypeSpec:
-		// Type names need identities for shadowing, but fields are not uses.
-		if v := x.define(n.Name); v != nil {
-			v.typeExpr = n.Type
-		}
 	case *ast.ForStmt:
 		x.loop(n, n.Init, nil, func() {
 			x.node(n.Cond)
@@ -431,25 +434,22 @@ func (x *loopIndex) node(n ast.Node) {
 			x.node(n.Body)
 		})
 	case *ast.RangeStmt:
-		evaluated := x.rangeExpressionEvaluated(n)
-		if evaluated {
-			x.node(n.X) // evaluated outside the new iteration scope
-			probe := &loopScanner{env: loopEnv{ctx: x.ctx}, index: x}
-			if probe.iteratorCallable(n.X) {
-				x.markInvocation(n.X)
-			}
+		x.rangeStmtNode(n)
+	default:
+		x.blockNode(n)
+	}
+}
+
+// blockNode visits explicit and implicit blocks, each in a new scope. Any
+// other statement only visits its children.
+func (x *loopIndex) blockNode(n ast.Stmt) {
+	switch n := n.(type) {
+	case *ast.BlockStmt:
+		x.pushScope()
+		for _, stmt := range n.List {
+			x.node(stmt)
 		}
-		x.loop(n, nil, n, func() {
-			// A skipped array operand still declares a fresh integer key.
-			if !evaluated && n.Tok == token.DEFINE {
-				if id, ok := n.Key.(*ast.Ident); ok {
-					if v := x.ids[id]; v != nil {
-						v.typeExpr = ast.NewIdent("int")
-					}
-				}
-			}
-			x.node(n.Body)
-		})
+		x.scope = x.scope.parent
 	case *ast.IfStmt:
 		x.pushScope()
 		x.node(n.Init)
@@ -487,6 +487,63 @@ func (x *loopIndex) node(n ast.Node) {
 		x.scope = x.scope.parent
 	default:
 		loopChildren(n, x.node)
+	}
+}
+
+func (x *loopIndex) assignStmtNode(n *ast.AssignStmt) {
+	for _, rhs := range n.Rhs {
+		x.node(rhs)
+	}
+	for i, lhs := range n.Lhs {
+		if id, ok := lhs.(*ast.Ident); ok && n.Tok == token.DEFINE && x.scope.vars[id.Name] == nil {
+			if v := x.define(id); v != nil && len(n.Rhs) == len(n.Lhs) {
+				v.valueInitializer = n.Rhs[i]
+				v.valueInitializerKnown = true
+			}
+		} else {
+			mode := loopWrite
+			if n.Tok != token.ASSIGN && n.Tok != token.DEFINE {
+				mode |= loopRead
+			}
+			x.lhs(lhs, mode)
+		}
+	}
+}
+
+func (x *loopIndex) rangeStmtNode(n *ast.RangeStmt) {
+	evaluated := x.rangeExpressionEvaluated(n)
+	if evaluated {
+		x.node(n.X) // evaluated outside the new iteration scope
+		probe := &loopScanner{env: loopEnv{ctx: x.ctx}, index: x}
+		if probe.iteratorCallable(n.X) {
+			x.markInvocation(n.X)
+		}
+	}
+	x.loop(n, nil, n, func() {
+		// A skipped array operand still declares a fresh integer key.
+		if !evaluated && n.Tok == token.DEFINE {
+			if id, ok := n.Key.(*ast.Ident); ok {
+				if v := x.ids[id]; v != nil {
+					v.typeExpr = ast.NewIdent("int")
+				}
+			}
+		}
+		x.node(n.Body)
+	})
+}
+
+func (x *loopIndex) valueSpecNode(n *ast.ValueSpec) {
+	for _, value := range n.Values {
+		x.node(value)
+	}
+	for i, id := range n.Names {
+		if v := x.define(id); v != nil {
+			v.typeExpr = n.Type
+			if i < len(n.Values) {
+				v.valueInitializer = n.Values[i]
+				v.valueInitializerKnown = true
+			}
+		}
 	}
 }
 
@@ -803,141 +860,196 @@ func loopCloneValues(src map[*loopVariable]loopValue) map[*loopVariable]loopValu
 // CallExpr is a barrier: its arguments run synchronously, and its result is not
 // assumed to retain every address or closure used to compute it.
 func (s *loopScanner) value(e ast.Expr, w *loopWalk) loopValue {
-	out := loopValue{}
 	switch e := loopUnparen(e).(type) {
 	case *ast.FuncLit:
+		out := loopValue{}
 		for v, mode := range s.index.captures[e] {
 			out[v] = w.referenceMode(v, loopRetain|(mode&loopCallableCaptureMask)<<loopCallableShift)
 		}
+		return out
 	case *ast.Ident:
+		out := loopValue{}
 		if v := s.index.ids[e]; v != nil {
 			loopMerge(out, w.values[v])
 		}
+		return out
 	case *ast.UnaryExpr:
-		if e.Op == token.AND {
-			if v := s.root(e.X); v != nil {
-				out[v] = w.referenceMode(v, loopRead)
-			} else {
-				loopMerge(out, s.addressValue(e.X, w))
-			}
-		}
+		return s.unaryExprValue(e, w)
 	case *ast.SelectorExpr:
-		if value, handled := s.promotedReceiverValue(e, w); handled {
-			return value
-		}
-		if projected, ok := s.projection(e); ok {
-			return s.value(projected, w)
-		}
-		info := s.env.ctx.types
-		field := s.fieldReceiverHint(e).field
-		if info != nil && info.Selections[e] != nil {
-			sel := info.Selections[e]
-			field = sel.Kind() == types.FieldVal
-			if sel.Kind() == types.MethodExpr {
-				return out // a method expression does not bind a receiver
-			}
-		}
-		if field {
-			if s.retains(e) {
-				// An implicit pointer dereference copies the selected contents,
-				// not the address of the aggregate containing the field.
-				if loaded, known := s.loadKnownPointee(e.X, w); known {
-					return loaded
-				}
-				loopMerge(out, s.value(e.X, w))
-			}
-			return out
-		}
-		if !s.retains(e) {
-			return out
-		}
-		// A value receiver reached via p copies *p now, not its storage.
-		// Retained fields in that copy remain opaque receiver data.
-		if s.methodCopiesPointee(e) {
-			if loaded, known := s.loadKnownPointee(e.X, w); known {
-				return loopBindMethodReceiver(loaded)
-			}
-		}
-		// Explicit pointer receivers retain their receiver just as implicit
-		// addressing does. Field values were handled above.
-		loopMerge(out, s.value(e.X, w))
-		if s.implicitAddress(e) {
-			if v := s.root(e.X); v != nil {
-				out[v] = w.referenceMode(v, loopRead)
-			}
-		}
-		return loopBindMethodReceiver(out)
+		return s.selectorExprValue(e, w)
 	case *ast.IndexExpr:
-		if !s.retains(e) {
-			return out
-		}
-		if projected, ok := s.projection(e); ok {
-			return s.value(projected, w)
-		}
-		// The index (including a map key) is evaluated synchronously.
-		if lit := s.directLiteral(e.X); lit != nil {
-			for _, elt := range lit.Elts {
-				if kv, ok := elt.(*ast.KeyValueExpr); ok {
-					elt = kv.Value
-				}
-				loopMerge(out, s.value(elt, w))
-			}
-		} else if loaded, known := s.loadKnownPointee(e.X, w); known {
-			// A pointer-to-array index loads the current element summary.
-			// Unknown heap/backing-store references keep the coarse fallback.
-			loopMerge(out, loaded)
-		} else {
-			loopMerge(out, s.value(e.X, w))
-		}
+		return s.indexExprValue(e, w)
 	case *ast.SliceExpr:
-		if projected, ok := s.sliceValue(e, w); ok {
-			loopMerge(out, projected)
-		} else {
-			loopMerge(out, s.value(e.X, w))
-		}
-		// Slicing an array also retains its storage, not just its contents.
-		if s.arrayValue(e.X) {
-			if v := s.root(e.X); v != nil {
-				out[v] = loopEpochMergeMode(out[v], w.referenceMode(v, loopRead))
-			}
-		}
+		return s.sliceExprValue(e, w)
 	case *ast.TypeAssertExpr:
+		out := loopValue{}
 		if s.retains(e) {
 			loopMerge(out, s.value(e.X, w))
 		}
+		return out
 	case *ast.StarExpr:
-		if s.retains(e) {
-			if loaded, known := s.loadKnownPointee(e.X, w); known {
-				return loaded
-			}
-		}
-		if s.callablePointer(e.X) {
-			return s.loadCallablePointer(e.X, w)
-		}
-		if s.retains(e) {
-			loopMerge(out, s.value(e.X, w))
-		}
+		return s.starExprValue(e, w)
 	case *ast.CompositeLit:
-		_, isMap := s.underlyingSyntax(e.Type).(*ast.MapType)
-		if info := s.env.ctx.types; info != nil && info.TypeOf(e) != nil {
-			_, isMap = info.TypeOf(e).Underlying().(*types.Map)
-		}
-		for _, elt := range e.Elts {
-			if kv, ok := elt.(*ast.KeyValueExpr); ok {
-				if isMap {
-					loopMerge(out, s.value(kv.Key, w))
-				}
-				loopMerge(out, s.value(kv.Value, w))
-			} else {
-				loopMerge(out, s.value(elt, w))
-			}
-		}
+		return s.compositeLitValue(e, w)
 	case *ast.CallExpr:
-		// A type conversion preserves its operand; an ordinary call does not
-		// imply that any descendant expressions escape.
-		if len(e.Args) == 1 && s.conversion(e.Fun) {
-			loopMerge(out, s.value(e.Args[0], w))
+		return s.callExprValue(e, w)
+	}
+	return loopValue{}
+}
+
+func (s *loopScanner) unaryExprValue(e *ast.UnaryExpr, w *loopWalk) loopValue {
+	out := loopValue{}
+	if e.Op == token.AND {
+		if v := s.root(e.X); v != nil {
+			out[v] = w.referenceMode(v, loopRead)
+		} else {
+			loopMerge(out, s.addressValue(e.X, w))
 		}
+	}
+	return out
+}
+
+func (s *loopScanner) selectorExprValue(e *ast.SelectorExpr, w *loopWalk) loopValue {
+	if value, handled := s.promotedReceiverValue(e, w); handled {
+		return value
+	}
+	if projected, ok := s.projection(e); ok {
+		return s.value(projected, w)
+	}
+	info := s.env.ctx.types
+	field := s.fieldReceiverHint(e).field
+	if info != nil && info.Selections[e] != nil {
+		sel := info.Selections[e]
+		field = sel.Kind() == types.FieldVal
+		if sel.Kind() == types.MethodExpr {
+			return loopValue{} // a method expression does not bind a receiver
+		}
+	}
+	if field {
+		return s.selectedFieldValue(e, w)
+	}
+	return s.boundMethodValue(e, w)
+}
+
+func (s *loopScanner) selectedFieldValue(e *ast.SelectorExpr, w *loopWalk) loopValue {
+	out := loopValue{}
+	if s.retains(e) {
+		// An implicit pointer dereference copies the selected contents,
+		// not the address of the aggregate containing the field.
+		if loaded, known := s.loadKnownPointee(e.X, w); known {
+			return loaded
+		}
+		loopMerge(out, s.value(e.X, w))
+	}
+	return out
+}
+
+func (s *loopScanner) boundMethodValue(e *ast.SelectorExpr, w *loopWalk) loopValue {
+	out := loopValue{}
+	if !s.retains(e) {
+		return out
+	}
+	// A value receiver reached via p copies *p now, not its storage.
+	// Retained fields in that copy remain opaque receiver data.
+	if s.methodCopiesPointee(e) {
+		if loaded, known := s.loadKnownPointee(e.X, w); known {
+			return loopBindMethodReceiver(loaded)
+		}
+	}
+	// Explicit pointer receivers retain their receiver just as implicit
+	// addressing does. Field values are handled by selectedFieldValue.
+	loopMerge(out, s.value(e.X, w))
+	if s.implicitAddress(e) {
+		if v := s.root(e.X); v != nil {
+			out[v] = w.referenceMode(v, loopRead)
+		}
+	}
+	return loopBindMethodReceiver(out)
+}
+
+func (s *loopScanner) indexExprValue(e *ast.IndexExpr, w *loopWalk) loopValue {
+	out := loopValue{}
+	if !s.retains(e) {
+		return out
+	}
+	if projected, ok := s.projection(e); ok {
+		return s.value(projected, w)
+	}
+	// The index (including a map key) is evaluated synchronously.
+	if lit := s.directLiteral(e.X); lit != nil {
+		for _, elt := range lit.Elts {
+			if kv, ok := elt.(*ast.KeyValueExpr); ok {
+				elt = kv.Value
+			}
+			loopMerge(out, s.value(elt, w))
+		}
+	} else if loaded, known := s.loadKnownPointee(e.X, w); known {
+		// A pointer-to-array index loads the current element summary.
+		// Unknown heap/backing-store references keep the coarse fallback.
+		loopMerge(out, loaded)
+	} else {
+		loopMerge(out, s.value(e.X, w))
+	}
+	return out
+}
+
+func (s *loopScanner) sliceExprValue(e *ast.SliceExpr, w *loopWalk) loopValue {
+	out := loopValue{}
+	if projected, ok := s.sliceValue(e, w); ok {
+		loopMerge(out, projected)
+	} else {
+		loopMerge(out, s.value(e.X, w))
+	}
+	// Slicing an array also retains its storage, not just its contents.
+	if s.arrayValue(e.X) {
+		if v := s.root(e.X); v != nil {
+			out[v] = loopEpochMergeMode(out[v], w.referenceMode(v, loopRead))
+		}
+	}
+	return out
+}
+
+func (s *loopScanner) starExprValue(e *ast.StarExpr, w *loopWalk) loopValue {
+	out := loopValue{}
+	if s.retains(e) {
+		if loaded, known := s.loadKnownPointee(e.X, w); known {
+			return loaded
+		}
+	}
+	if s.callablePointer(e.X) {
+		return s.loadCallablePointer(e.X, w)
+	}
+	if s.retains(e) {
+		loopMerge(out, s.value(e.X, w))
+	}
+	return out
+}
+
+func (s *loopScanner) compositeLitValue(e *ast.CompositeLit, w *loopWalk) loopValue {
+	out := loopValue{}
+	_, isMap := s.underlyingSyntax(e.Type).(*ast.MapType)
+	if info := s.env.ctx.types; info != nil && info.TypeOf(e) != nil {
+		_, isMap = info.TypeOf(e).Underlying().(*types.Map)
+	}
+	for _, elt := range e.Elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			if isMap {
+				loopMerge(out, s.value(kv.Key, w))
+			}
+			loopMerge(out, s.value(kv.Value, w))
+		} else {
+			loopMerge(out, s.value(elt, w))
+		}
+	}
+	return out
+}
+
+func (s *loopScanner) callExprValue(e *ast.CallExpr, w *loopWalk) loopValue {
+	out := loopValue{}
+	// A type conversion preserves its operand; an ordinary call does not
+	// imply that any descendant expressions escape.
+	if len(e.Args) == 1 && s.conversion(e.Fun) {
+		loopMerge(out, s.value(e.Args[0], w))
 	}
 	return out
 }
@@ -1054,78 +1166,21 @@ func (s *loopScanner) syntaxType(e ast.Expr) ast.Expr {
 func (s *loopScanner) syntaxTypeSeen(e ast.Expr, seen map[*loopVariable]bool) ast.Expr {
 	switch e := loopUnparen(e).(type) {
 	case *ast.Ident:
-		v := s.index.ids[e]
-		if v != nil {
-			if v.typeExpr != nil {
-				return s.underlyingSyntax(v.typeExpr)
-			}
-			if seen[v] {
-				return nil
-			}
-			seen[v] = true
-			defer delete(seen, v)
-		}
-		if e.Obj != nil {
-			switch d := e.Obj.Decl.(type) {
-			case *ast.ValueSpec:
-				if d.Type != nil {
-					return s.underlyingSyntax(d.Type)
-				}
-				for i, id := range d.Names {
-					if id.Obj == e.Obj && i < len(d.Values) {
-						return s.syntaxTypeSeen(d.Values[i], seen)
-					}
-				}
-			case *ast.Field:
-				return s.underlyingSyntax(d.Type)
-			case *ast.AssignStmt:
-				for i, lhs := range d.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok && id.Obj == e.Obj && i < len(d.Rhs) {
-						return s.syntaxTypeSeen(d.Rhs[i], seen)
-					}
-				}
-			}
-		}
-		// SkipObjectResolution removes declaration links. The indexed loop
-		// regions still contain local declarations, with identity-resolved LHSs.
-		if v != nil {
-			if rhs := s.syntaxInitializer(v); rhs != nil {
-				return s.syntaxTypeSeen(rhs, seen)
-			}
-		}
+		return s.identSyntaxType(e, seen)
 	case *ast.CompositeLit:
 		return s.underlyingSyntax(e.Type)
 	case *ast.FuncLit:
 		return e.Type
 	case *ast.UnaryExpr:
-		if e.Op == token.AND {
-			if typ := s.syntaxTypeSeen(e.X, seen); typ != nil {
-				return &ast.StarExpr{X: typ}
-			}
-		}
+		return s.unaryExprSyntaxType(e, seen)
 	case *ast.StarExpr:
 		if typ, ok := s.syntaxTypeSeen(e.X, seen).(*ast.StarExpr); ok {
 			return s.underlyingSyntax(typ.X)
 		}
 	case *ast.SelectorExpr:
-		typ, _, _ := s.fieldSyntax(s.syntaxTypeSeen(e.X, seen), e.Sel.Name)
-		if typ == nil {
-			if hint := s.receiverHint(e.X, e.Sel.Name); hint.field && len(hint.path) != 0 {
-				typ = hint.path[len(hint.path)-1].typ
-			}
-		}
-		return s.underlyingSyntax(typ)
+		return s.selectorExprSyntaxType(e, seen)
 	case *ast.IndexExpr:
-		typ := s.syntaxTypeSeen(e.X, seen)
-		if p, ok := typ.(*ast.StarExpr); ok {
-			typ = s.underlyingSyntax(p.X)
-		}
-		switch typ := typ.(type) {
-		case *ast.ArrayType:
-			return s.underlyingSyntax(typ.Elt)
-		case *ast.MapType:
-			return s.underlyingSyntax(typ.Value)
-		}
+		return s.indexExprSyntaxType(e, seen)
 	case *ast.SliceExpr:
 		if typ, ok := s.syntaxTypeSeen(e.X, seen).(*ast.ArrayType); ok {
 			return &ast.ArrayType{Elt: typ.Elt}
@@ -1133,20 +1188,110 @@ func (s *loopScanner) syntaxTypeSeen(e ast.Expr, seen map[*loopVariable]bool) as
 	case *ast.TypeAssertExpr:
 		return s.underlyingSyntax(e.Type)
 	case *ast.CallExpr:
-		if id, ok := loopUnparen(e.Fun).(*ast.Ident); ok && len(e.Args) > 0 && s.index.external[id.Name] == s.index.ids[id] {
-			switch id.Name {
-			case "new":
-				return &ast.StarExpr{X: s.underlyingSyntax(e.Args[0])}
-			case "make":
-				return s.underlyingSyntax(e.Args[0])
-			}
-		}
-		if s.conversion(e.Fun) {
-			return s.underlyingSyntax(e.Fun)
-		}
+		return s.callExprSyntaxType(e)
 	case *ast.BasicLit:
 		// All literal kinds are scalar for retention purposes.
 		return ast.NewIdent("int")
+	}
+	return nil
+}
+
+func (s *loopScanner) identSyntaxType(e *ast.Ident, seen map[*loopVariable]bool) ast.Expr {
+	v := s.index.ids[e]
+	if v != nil {
+		if v.typeExpr != nil {
+			return s.underlyingSyntax(v.typeExpr)
+		}
+		if seen[v] {
+			return nil
+		}
+		seen[v] = true
+		defer delete(seen, v)
+	}
+	if e.Obj != nil {
+		if typ, declared := s.objectSyntaxType(e.Obj, seen); declared {
+			return typ
+		}
+	}
+	// SkipObjectResolution removes declaration links. The indexed loop
+	// regions still contain local declarations, with identity-resolved LHSs.
+	if v != nil {
+		if rhs := s.syntaxInitializer(v); rhs != nil {
+			return s.syntaxTypeSeen(rhs, seen)
+		}
+	}
+	return nil
+}
+
+// objectSyntaxType reads a type from the declaration the parser linked to obj.
+// It reports false when that declaration neither states nor initializes obj.
+func (s *loopScanner) objectSyntaxType(obj *ast.Object, seen map[*loopVariable]bool) (ast.Expr, bool) {
+	switch d := obj.Decl.(type) {
+	case *ast.ValueSpec:
+		if d.Type != nil {
+			return s.underlyingSyntax(d.Type), true
+		}
+		for i, id := range d.Names {
+			if id.Obj == obj && i < len(d.Values) {
+				return s.syntaxTypeSeen(d.Values[i], seen), true
+			}
+		}
+	case *ast.Field:
+		return s.underlyingSyntax(d.Type), true
+	case *ast.AssignStmt:
+		for i, lhs := range d.Lhs {
+			if id, ok := lhs.(*ast.Ident); ok && id.Obj == obj && i < len(d.Rhs) {
+				return s.syntaxTypeSeen(d.Rhs[i], seen), true
+			}
+		}
+	}
+	return nil, false
+}
+
+func (s *loopScanner) unaryExprSyntaxType(e *ast.UnaryExpr, seen map[*loopVariable]bool) ast.Expr {
+	if e.Op == token.AND {
+		if typ := s.syntaxTypeSeen(e.X, seen); typ != nil {
+			return &ast.StarExpr{X: typ}
+		}
+	}
+	return nil
+}
+
+func (s *loopScanner) selectorExprSyntaxType(e *ast.SelectorExpr, seen map[*loopVariable]bool) ast.Expr {
+	typ, _, _ := s.fieldSyntax(s.syntaxTypeSeen(e.X, seen), e.Sel.Name)
+	if typ == nil {
+		if hint := s.receiverHint(e.X, e.Sel.Name); hint.field && len(hint.path) != 0 {
+			typ = hint.path[len(hint.path)-1].typ
+		}
+	}
+	return s.underlyingSyntax(typ)
+}
+
+func (s *loopScanner) indexExprSyntaxType(e *ast.IndexExpr, seen map[*loopVariable]bool) ast.Expr {
+	typ := s.syntaxTypeSeen(e.X, seen)
+	if p, ok := typ.(*ast.StarExpr); ok {
+		typ = s.underlyingSyntax(p.X)
+	}
+	switch typ := typ.(type) {
+	case *ast.ArrayType:
+		return s.underlyingSyntax(typ.Elt)
+	case *ast.MapType:
+		return s.underlyingSyntax(typ.Value)
+	}
+	return nil
+}
+
+func (s *loopScanner) callExprSyntaxType(e *ast.CallExpr) ast.Expr {
+	if id, ok := loopUnparen(e.Fun).(*ast.Ident); ok && len(e.Args) > 0 && s.index.external[id.Name] == s.index.ids[id] {
+		switch id.Name {
+		case "new":
+			return &ast.StarExpr{X: s.underlyingSyntax(e.Args[0])}
+		case "make":
+			return s.underlyingSyntax(e.Args[0])
+		}
+	}
+	if s.conversion(e.Fun) {
+		return s.underlyingSyntax(e.Fun)
 	}
 	return nil
 }
@@ -1610,55 +1755,77 @@ func loopShared(v *loopVariable, l *loopRegion) bool {
 
 func (s *loopScanner) report() {
 	if s.flowConflicts != nil {
-		for _, launch := range s.launches {
-			if len(launch.loops) == 0 && !s.flowConflicts.loopCalls[launch.stmt] {
-				continue
-			}
-			stmt := launch.stmt
-			if s.flowConflicts.direct[stmt] || s.flowConflicts.siblings[stmt] || s.flowConflicts.copies[stmt] {
-				s.finding(stmt, "goroutine-in-loop", "goroutine launched inside loop captures shared mutable variable")
-			}
-		}
+		s.reportFlowConflicts()
 		return
 	}
 	siblings := loopSiblingHazards(s.rootNode, s.launches)
 	direct := loopDirectHazards(s.rootNode, s.launches, s.index.direct)
-	sharedWriters := map[*loopRegion]map[*loopVariable]bool{}
+	sharedWriters := loopSharedWriters(s.launches)
 	for _, launch := range s.launches {
+		if len(launch.loops) == 0 {
+			continue
+		}
+		if siblings[launch.stmt] || direct[launch.stmt] || loopLaunchHazard(launch, sharedWriters) {
+			s.finding(launch.stmt, "goroutine-in-loop", "goroutine launched inside loop captures shared mutable variable")
+		}
+	}
+}
+
+func (s *loopScanner) reportFlowConflicts() {
+	for _, launch := range s.launches {
+		if len(launch.loops) == 0 && !s.flowConflicts.loopCalls[launch.stmt] {
+			continue
+		}
+		stmt := launch.stmt
+		if s.flowConflicts.direct[stmt] || s.flowConflicts.siblings[stmt] || s.flowConflicts.copies[stmt] {
+			s.finding(stmt, "goroutine-in-loop", "goroutine launched inside loop captures shared mutable variable")
+		}
+	}
+}
+
+// loopSharedWriters indexes, for each loop, the shared variables written by a
+// launch from that loop's own frame.
+func loopSharedWriters(launches []loopLaunch) map[*loopRegion]map[*loopVariable]bool {
+	sharedWriters := map[*loopRegion]map[*loopVariable]bool{}
+	for _, launch := range launches {
 		for v, mode := range launch.values {
 			if mode&(loopWrite|loopIndirectWrite) == 0 {
 				continue
 			}
 			for _, l := range launch.loops {
-				if l.owner == launch.owner && loopShared(v, l) {
-					if sharedWriters[l] == nil {
-						sharedWriters[l] = map[*loopVariable]bool{}
-					}
-					sharedWriters[l][v] = true
+				if l.owner != launch.owner || !loopShared(v, l) {
+					continue
 				}
+				if sharedWriters[l] == nil {
+					sharedWriters[l] = map[*loopVariable]bool{}
+				}
+				sharedWriters[l][v] = true
 			}
 		}
 	}
-	for _, launch := range s.launches {
-		if len(launch.loops) == 0 {
+	return sharedWriters
+}
+
+func loopLaunchHazard(launch loopLaunch, sharedWriters map[*loopRegion]map[*loopVariable]bool) bool {
+	for v, mode := range launch.values {
+		if mode&(loopReadAccessMask|loopWrite|loopIndirectWrite) == 0 {
 			continue
 		}
-		hazard := siblings[launch.stmt] || direct[launch.stmt]
-		for v, mode := range launch.values {
-			if mode&(loopReadAccessMask|loopWrite|loopIndirectWrite) == 0 {
-				continue
+		for _, l := range launch.loops {
+			if loopCaptureHazard(v, mode, l, sharedWriters) {
+				return true
 			}
-			for _, l := range launch.loops {
-				if loopShared(v, l) && (l.writes[v] || sharedWriters[l][v] || mode&(loopWrite|loopIndirectWrite) != 0) {
-					hazard = true
-				}
-				if mode&loopWrite != 0 && l.copyReachable && l.copies[v] {
-					hazard = true
-				}
-			}
-		}
-		if hazard {
-			s.finding(launch.stmt, "goroutine-in-loop", "goroutine launched inside loop captures shared mutable variable")
 		}
 	}
+	return false
+}
+
+// loopCaptureHazard reports whether a launch's access to v conflicts with a
+// write to storage that iterations of l share, or writes a header variable
+// that l copies into its next iteration.
+func loopCaptureHazard(v *loopVariable, mode loopAccess, l *loopRegion, sharedWriters map[*loopRegion]map[*loopVariable]bool) bool {
+	if loopShared(v, l) && (l.writes[v] || sharedWriters[l][v] || mode&(loopWrite|loopIndirectWrite) != 0) {
+		return true
+	}
+	return mode&loopWrite != 0 && l.copyReachable && l.copies[v]
 }
