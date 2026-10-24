@@ -19,41 +19,42 @@ const installPackage = "github.com/mikills/diago/cmd/diago"
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "--help", "-h", "help":
-			printUsage()
-			return
-		case "--version", "-version", "version":
-			printVersion()
-			return
-		case "compare":
-			runCompare(os.Args[2:])
-			return
-		case "format", "fmt":
-			runFormat(os.Args[2:])
-			return
-		case "audit":
-			runAudit(os.Args[2:])
-			return
-		case "perf", "profile":
-			runProfile(os.Args[2:])
-			return
-		case "upgrade":
-			runUpgrade(os.Args[2:])
-			return
-		case "skills":
-			runSkills(os.Args[2:])
-			return
-		}
+	if dispatchCommand(os.Args[1:]) {
+		return
 	}
-
 	args, perf := stripPerfFlag(os.Args[1:])
 	if perf {
 		runProfile(args)
 		return
 	}
 	runAudit(args)
+}
+
+func dispatchCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "--help", "-h", "help":
+		printUsage()
+	case "--version", "-version", "version":
+		printVersion()
+	case "compare":
+		runCompare(args[1:])
+	case "format", "fmt":
+		runFormat(args[1:])
+	case "audit":
+		runAudit(args[1:])
+	case "perf", "profile":
+		runProfile(args[1:])
+	case "upgrade":
+		runUpgrade(args[1:])
+	case "skills":
+		runSkills(args[1:])
+	default:
+		return false
+	}
+	return true
 }
 
 func printVersion() {

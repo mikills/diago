@@ -35,7 +35,9 @@ diago -target ./...
 diago -target ./... -format json -output diago-audit.json
 diago -target ./... -race
 ```
-Audit runs Go's test and vet commands, plus native checks for complexity, errors, resource lifecycles, context use, dead-code hints, size, and maintainability.
+Audit runs Go's test and vet commands, plus native checks for complexity, errors, resource lifecycles, context use, dead-code hints, size, and maintainability. The file-size check allows up to 5,000 lines per handwritten production file; test and generated files are exempt. Package file and function counts are not limited.
+
+Loop checks report defers that accumulate in the current function and goroutine calls that retain shared mutable variables. They respect module and per-file Go language versions, including Go 1.22's fresh iteration variables. Arguments evaluated synchronously are not captures. These checks do not impose a goroutine concurrency limit or perform general interprocedural race analysis. Aggregate contents use conservative merged summaries; arbitrary call-result and heap/backing-store aliases are not inferred. Retained older local allocations share a per-local may-alias bucket; old aggregate contents are not snapshotted. Iterator expansion is limited to 4,096 added CFG blocks or 512 expansions per function context. Exceeding that budget emits `iterator-analysis-incomplete` (medium): review those loop captures manually rather than treating an empty hazard list as proof of safety.
 
 Native error checks also cover terminal iterator errors. Call `rows.Err()` after iterating `database/sql.Rows` and `scanner.Err()` after a `bufio.Scanner` loop. These report-only rules accept adjacent `//diago:ignore sql-rows-err` or `//diago:ignore scanner-err` directives when the omission is intentional.
 

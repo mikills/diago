@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestRunCoverageSkipsPackagesWithoutTests(t *testing.T) {
+func TestCovSkipNoTests(t *testing.T) {
 	dir := coverageModule(t, false)
 	targets, check := coverageTargets(dir, "./...")
 	if !check.Passed {
@@ -35,7 +35,7 @@ func TestRunCoverageWithNoTestsPasses(t *testing.T) {
 	}
 }
 
-func TestRunCoveragePreservesTestFailures(t *testing.T) {
+func TestCovKeepsFailures(t *testing.T) {
 	dir := coverageModule(t, true)
 	_, check := runCoverage(dir, "./...")
 	if check.Passed {
@@ -46,7 +46,7 @@ func TestRunCoveragePreservesTestFailures(t *testing.T) {
 	}
 }
 
-func TestRunCoveragePreservesPackagePatternAndEnvironment(t *testing.T) {
+func TestCovKeepsEnv(t *testing.T) {
 	dir := coverageModule(t, false)
 	writeCoverageFile(t, dir, "other/other.go", "package other\n\nfunc Value() int { return 1 }\n")
 	writeCoverageFile(t, dir, "other/other_test.go", "package other\n\nimport \"testing\"\n\nfunc TestFailure(t *testing.T) { t.Fatal(\"outside selected pattern\") }\n")

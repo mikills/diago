@@ -181,7 +181,7 @@ func TestFilterSkippedFindings(t *testing.T) {
 	})
 }
 
-func TestGeneratedFilesDoNotInflateLargePackageTotals(t *testing.T) {
+func TestPackageSizeIgnored(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/size\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -196,16 +196,20 @@ func TestGeneratedFilesDoNotInflateLargePackageTotals(t *testing.T) {
 	for i := range 51 {
 		var generated strings.Builder
 		generated.WriteString("package generatedsql\n")
-		for j := range 10 {
+		for j := range 20 {
 			fmt.Fprintf(&generated, "func Query%d_%d() {}\n", i, j)
 		}
 		generatedName := filepath.Join(generatedDir, fmt.Sprintf("query_%02d.sql.go", i))
 		if err := os.WriteFile(generatedName, []byte(generated.String()), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		handwritten := fmt.Sprintf("package handwritten\nfunc Part%d() {}\n", i)
+		var handwritten strings.Builder
+		handwritten.WriteString("package handwritten\n")
+		for j := range 20 {
+			fmt.Fprintf(&handwritten, "func Part%d_%d() {}\n", i, j)
+		}
 		handwrittenName := filepath.Join(handwrittenDir, fmt.Sprintf("part_%02d.go", i))
-		if err := os.WriteFile(handwrittenName, []byte(handwritten), 0o644); err != nil {
+		if err := os.WriteFile(handwrittenName, []byte(handwritten.String()), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -214,16 +218,9 @@ func TestGeneratedFilesDoNotInflateLargePackageTotals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	largePackages := map[string]bool{}
 	for _, finding := range findings {
 		if finding.Rule == "large-package" {
-			largePackages[finding.Package] = true
+			t.Fatalf("package size should not be reported: %+v", finding)
 		}
-	}
-	if largePackages["example.com/size/generatedsql"] {
-		t.Fatalf("generated-only sqlc package counted as large: %+v", findings)
-	}
-	if !largePackages["example.com/size/handwritten"] {
-		t.Fatalf("handwritten large package was not reported: %+v", findings)
 	}
 }

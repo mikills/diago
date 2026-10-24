@@ -1,0 +1,568 @@
+package diago
+
+import (
+	"go/ast"
+	"go/token"
+
+	"golang.org/x/tools/go/cfg"
+)
+
+// A known iterator and its yield callback form a synchronous coroutine, not a
+// call at X followed by an independent loop. Splice the iterator CFG into the
+// caller: a yield enters the existing range body, fallthrough/continue resumes
+// with true, and break/return resumes with false before the pending caller exit.
+// In the false state a further yield terminates (the runtime panics).
+//
+// Each physical range invocation has its own entry and snapshot slots, even
+// when multiple invocations reuse the same source AST. Within that occurrence
+// the callback body is shared between yield sites: their continuations join,
+// but no edge ever resumes the iterator's initial entry. Effects reachable
+// only before the first yield cannot be mistaken for post-launch effects.
+// Original AST identities and function owners are preserved, including defers;
+// only CFG edges change. The ordinary range adapter still creates fresh target
+// storage on body entry, with private slots snapshotting each yield's arguments.
+type loopFlowIterator struct {
+	rng   *loopFlowRange
+	lit   *ast.FuncLit
+	entry *cfg.Block // the physical occurrence, never an AST-expression search
+}
+
+// Exact coroutine expansion can be exponential in a compact iterator DAG.
+// Bound both storage and expansion work, and report incompleteness rather than
+// treating an unexpanded known iterator as a proven-clean invocation.
+const loopIteratorBlockBudget = 4096
+const loopIteratorOccurrenceBudget = 512
+
+// The wrapper is opaque only as an identity: its child retains every original
+// identifier, type-info key and function owner used by effects and bindings.
+func loopIteratorEntry(x ast.Expr) ast.Expr {
+	return &ast.ParenExpr{Lparen: x.Pos(), X: x, Rparen: x.End()}
+}
+
+func (a *loopFlowAST) planIterator(rng *loopFlowRange) {
+	if a.index == nil {
+		return
+	}
+	x := loopUnparen(rng.stmt.X)
+	lit, _ := x.(*ast.FuncLit)
+	if id, ok := x.(*ast.Ident); ok {
+		v := a.index.ids[id]
+		// A single local literal initializer, never reassigned or addressed.
+		// No call-result, field, alias, or package-function inference.
+		if v == nil || !v.valueInitializerKnown || len(v.writes) != 0 {
+			return
+		}
+		lit, _ = loopUnparen(v.valueInitializer).(*ast.FuncLit)
+		for node := range a.index.locations {
+			if unary, ok := node.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+				if name, ok := loopUnparen(unary.X).(*ast.Ident); ok && a.index.ids[name] == v {
+					return
+				}
+			}
+		}
+	}
+	if lit == nil || lit.Type.Params == nil || len(lit.Type.Params.List) != 1 || len(lit.Type.Params.List[0].Names) != 1 {
+		return
+	}
+	yield := a.index.ids[lit.Type.Params.List[0].Names[0]]
+	if yield == nil || !loopIteratorSupported(lit.Body, yield, a.index) || !loopIteratorBodySupported(rng.stmt, a.rangeLabels[rng.stmt]) {
+		return
+	}
+	if a.iteratorEntries == nil {
+		a.iteratorEntries = map[ast.Node]bool{}
+		a.inlinedIterators = map[*ast.FuncLit]bool{}
+	}
+	rng.iterator = lit
+	a.iterators = append(a.iterators, &loopFlowIterator{rng: rng, lit: lit})
+	a.inlinedIterators[lit] = true
+}
+
+// Direct yield expression statements and boolean conditions (including !yield)
+// have explicit true/false CFG successors. An escaped/stored yield callback or
+// a yield buried in an arbitrary expression needs a richer expression CFG and
+// deliberately keeps the conservative ordinary invocation fallback.
+func loopIteratorSupported(body *ast.BlockStmt, yield *loopVariable, index *loopIndex) bool {
+	allowed := map[*ast.Ident]bool{}
+	ast.Inspect(body, func(node ast.Node) bool {
+		var expr ast.Expr
+		switch n := node.(type) {
+		case *ast.ExprStmt:
+			expr = n.X
+		case *ast.IfStmt:
+			expr = n.Cond
+		case *ast.ForStmt:
+			expr = n.Cond
+		}
+		if call, _ := loopIteratorYield(expr, yield, index); call != nil {
+			allowed[loopUnparen(call.Fun).(*ast.Ident)] = true
+		}
+		_, literal := node.(*ast.FuncLit)
+		return !literal
+	})
+	ok := true
+	ast.Inspect(body, func(node ast.Node) bool {
+		if id, yes := node.(*ast.Ident); yes && index.ids[id] == yield && !allowed[id] {
+			ok = false
+		}
+		return true
+	})
+	return ok
+}
+
+func loopIteratorBodySupported(rng *ast.RangeStmt, ownLabel string) bool {
+	// External labeled transfers need a pending-exit stack across nested
+	// iterators. Break/continue of this range, return, and body-local gotos work.
+	labels := map[string]bool{}
+	ast.Inspect(rng.Body, func(node ast.Node) bool {
+		if label, ok := node.(*ast.LabeledStmt); ok {
+			labels[label.Label.Name] = true
+		}
+		_, literal := node.(*ast.FuncLit)
+		return !literal
+	})
+	ok := true
+	ast.Inspect(rng.Body, func(node ast.Node) bool {
+		if branch, yes := node.(*ast.BranchStmt); yes && branch.Label != nil && !labels[branch.Label.Name] {
+			if branch.Label.Name != ownLabel || branch.Tok != token.BREAK && branch.Tok != token.CONTINUE {
+				ok = false
+			}
+		}
+		_, literal := node.(*ast.FuncLit)
+		return !literal
+	})
+	return ok
+}
+
+func loopIteratorYield(expr ast.Expr, yield *loopVariable, index *loopIndex) (*ast.CallExpr, bool) {
+	negated := false
+	if expr == nil {
+		return nil, false
+	}
+	expr = loopUnparen(expr)
+	for {
+		unary, ok := expr.(*ast.UnaryExpr)
+		if !ok || unary.Op != token.NOT {
+			break
+		}
+		negated = !negated
+		expr = loopUnparen(unary.X)
+	}
+	if call, ok := expr.(*ast.CallExpr); ok {
+		if id, ok := loopUnparen(call.Fun).(*ast.Ident); ok && index.ids[id] == yield {
+			return call, negated
+		}
+	}
+	return nil, false
+}
+
+func loopIteratorBlock(graph *cfg.CFG, nodes []ast.Node, next ...*cfg.Block) *cfg.Block {
+	block := &cfg.Block{Index: int32(len(graph.Blocks)), Nodes: nodes, Succs: next}
+	graph.Blocks = append(graph.Blocks, block)
+	return block
+}
+
+// Splitting at primitive nodes makes each yield a suspension point, even when
+// it shares a basic block with earlier/later writes or the implicit return.
+func loopIteratorSplit(graph *cfg.CFG) {
+	blocks := append([]*cfg.Block(nil), graph.Blocks...)
+	for _, block := range blocks {
+		if len(block.Nodes) < 2 {
+			continue
+		}
+		nodes, next := block.Nodes, block.Succs
+		block.Nodes, block.Succs = nodes[:1], nil
+		last := block
+		for _, node := range nodes[1:] {
+			current := loopIteratorBlock(graph, []ast.Node{node})
+			last.Succs = []*cfg.Block{current}
+			last = current
+		}
+		last.Succs = next
+	}
+}
+
+func (a *loopFlowAST) expandIterators(graph *cfg.CFG) {
+	// Initial plans belong to the caller CFG. Later plans are registered with
+	// their exact entry block as each true/false iterator copy is created.
+	plans := map[ast.Node]*loopFlowIterator{}
+	for _, it := range a.iterators {
+		plans[it.rng.entry] = it
+	}
+	for _, block := range graph.Blocks {
+		for _, node := range block.Nodes {
+			if it := plans[node]; it != nil {
+				it.entry = block
+			}
+		}
+	}
+	initial := len(graph.Blocks)
+	for i := 0; i < len(a.iterators); i++ {
+		it := a.iterators[i]
+		if i >= loopIteratorOccurrenceBudget || !a.expandIterator(graph, it, loopIteratorBlockBudget-(len(graph.Blocks)-initial)) {
+			a.iteratorIncomplete = it.rng.stmt
+			return
+		}
+	}
+}
+
+func (a *loopFlowAST) expandIterator(graph *cfg.CFG, it *loopFlowIterator, budget int) bool {
+	if it.entry == nil || len(it.entry.Succs) != 1 {
+		return false
+	}
+	header := it.entry.Succs[0]
+	if len(header.Succs) != 2 {
+		return false
+	}
+	e := &loopIteratorExpansion{a: a, graph: graph, it: it, header: header, body: header.Succs[0], done: header.Succs[1]}
+	// Capture callback exits BEFORE installing iterator edges.
+	e.exits = e.callbackExits()
+	e.iterator = e.adaptTemplate()
+	e.atYield = e.suspensions()
+	e.yields, e.reachable = e.reachableYields()
+	e.stoppedReachable = e.stoppedBlocks()
+	// Preflight before allocating or modifying any caller edges.
+	if e.cost() > budget {
+		return false
+	}
+	normal := e.clone(e.done, false)
+	trueResume := e.enterYields(normal)
+	e.resumeExits(trueResume)
+	if a.deferred != nil {
+		header.Nodes = append(header.Nodes, a.deferred.iteratorEntry(it.lit, it.lit.Pos()))
+	}
+	header.Succs = []*cfg.Block{normal[e.iterator.Blocks[0]]}
+	a.iteratorEntries[it.rng.entry] = true
+	return true
+}
+
+// loopIteratorExpansion is the state of one expandIterator call: the caller's
+// range header and body, the iterator's template CFG, and its yield points.
+type loopIteratorExpansion struct {
+	a                *loopFlowAST
+	graph            *cfg.CFG
+	it               *loopFlowIterator
+	header           *cfg.Block
+	body, done       *cfg.Block
+	exits            []loopIteratorExit
+	iterator         *cfg.CFG
+	atYield          map[*cfg.Block]loopIteratorSuspension
+	yields           []loopIteratorSuspension
+	reachable        map[*cfg.Block]bool
+	stoppedReachable map[*cfg.Block]bool
+	falseResumes     map[*cfg.Block]*cfg.Block
+	pendingReturn    *cfg.Block
+}
+
+// loopIteratorExit is a callback edge out of the range body. A return without
+// a pending continuation has edge -1 and no target.
+type loopIteratorExit struct {
+	from, to *cfg.Block
+	edge     int
+}
+
+type loopIteratorSuspension struct {
+	block, yes, no *cfg.Block
+	call           *ast.CallExpr
+}
+
+func (e *loopIteratorExpansion) callbackExits() []loopIteratorExit {
+	var exits []loopIteratorExit
+	seen := map[*cfg.Block]bool{}
+	queue := []*cfg.Block{e.body}
+	for len(queue) != 0 {
+		block := queue[0]
+		queue = queue[1:]
+		if seen[block] {
+			continue
+		}
+		seen[block] = true
+		if block.Return() != nil {
+			if len(block.Succs) == 1 {
+				// An enclosing iterator has already installed its pending
+				// return continuation. Finish this iterator before that one.
+				exits = append(exits, loopIteratorExit{from: block, to: block.Succs[0], edge: 0})
+			} else {
+				exits = append(exits, loopIteratorExit{from: block, edge: -1})
+			}
+			continue
+		}
+		for edge, next := range block.Succs {
+			if next == e.header || next == e.done {
+				exits = append(exits, loopIteratorExit{from: block, to: next, edge: edge})
+			} else {
+				queue = append(queue, next)
+			}
+		}
+	}
+	return exits
+}
+
+// Use the same adapter maps for nested ranges/copy steps and ordinary label
+// repair. Iterator returns will be replaced by edges to the caller exit.
+// Adapting a template discovers nested ranges, not physical invocations.
+// Remove its plans: clone below creates one plan and fresh snapshot slots
+// per actual occurrence, including copies entered after a false yield.
+func (e *loopIteratorExpansion) adaptTemplate() *cfg.CFG {
+	a := e.a
+	start, template := len(a.iterators), a.iteratorTemplate
+	a.iteratorTemplate = true
+	iterator := cfg.New(a.block(e.it.lit.Body), func(*ast.CallExpr) bool { return true })
+	a.iteratorTemplate = template
+	a.iterators = a.iterators[:start]
+	loopIteratorSplit(iterator)
+	return iterator
+}
+
+func (e *loopIteratorExpansion) suspensions() map[*cfg.Block]loopIteratorSuspension {
+	yield := e.a.index.ids[e.it.lit.Type.Params.List[0].Names[0]]
+	atYield := map[*cfg.Block]loopIteratorSuspension{}
+	for _, block := range e.iterator.Blocks {
+		if len(block.Nodes) != 1 {
+			continue
+		}
+		var expr ast.Expr
+		switch node := block.Nodes[0].(type) {
+		case ast.Expr:
+			expr = node
+		case *ast.ExprStmt:
+			expr = node.X
+		}
+		if call, negated := loopIteratorYield(expr, yield, e.a.index); call != nil {
+			yes, no := block.Succs[0], block.Succs[0]
+			if len(block.Succs) == 2 {
+				no = block.Succs[1]
+				if negated {
+					yes, no = no, yes
+				}
+			}
+			point := loopIteratorSuspension{block, yes, no, call}
+			atYield[block] = point
+		}
+	}
+	return atYield
+}
+
+// Only yields reachable while earlier callbacks return true can invoke
+// the shared body. Do not resurrect dead code or a yield in a false-only
+// branch by adding its continuation to the shared resume point.
+func (e *loopIteratorExpansion) reachableYields() ([]loopIteratorSuspension, map[*cfg.Block]bool) {
+	var yields []loopIteratorSuspension
+	reachable := map[*cfg.Block]bool{}
+	pending := []*cfg.Block{e.iterator.Blocks[0]}
+	for len(pending) != 0 {
+		block := pending[0]
+		pending = pending[1:]
+		if reachable[block] {
+			continue
+		}
+		reachable[block] = true
+		if point, ok := e.atYield[block]; ok {
+			yields = append(yields, point)
+			pending = append(pending, point.yes)
+		} else {
+			pending = append(pending, block.Succs...)
+		}
+	}
+	return yields, reachable
+}
+
+// A stopped copy starts at false continuations, never at the iterator's
+// initial entry. Do not clone unreachable headers (or expand their DAGs).
+func (e *loopIteratorExpansion) stoppedBlocks() map[*cfg.Block]bool {
+	stoppedReachable := map[*cfg.Block]bool{}
+	var pending []*cfg.Block
+	for _, point := range e.yields {
+		pending = append(pending, point.no)
+	}
+	for len(pending) != 0 {
+		block := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if stoppedReachable[block] {
+			continue
+		}
+		stoppedReachable[block] = true
+		if _, stop := e.atYield[block]; !stop {
+			pending = append(pending, block.Succs...)
+		}
+	}
+	return stoppedReachable
+}
+
+// The extra blocks cover true/false resume points and a pending void-return exit.
+func (e *loopIteratorExpansion) cost() int {
+	finishes := map[*cfg.Block]bool{}
+	for _, out := range e.exits {
+		if out.to != e.header {
+			finishes[out.to] = true
+		}
+	}
+	return len(e.reachable) + e.returnCost(e.reachable) + len(finishes)*(len(e.stoppedReachable)+e.returnCost(e.stoppedReachable)+2) + 1
+}
+
+func (e *loopIteratorExpansion) returnCost(selected map[*cfg.Block]bool) int {
+	if e.a.deferred == nil {
+		return 0
+	}
+	n := 0
+	for block := range selected {
+		if block.Return() != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// loopIteratorRanges maps each template range to its copy in one clone.
+type loopIteratorRanges map[*loopFlowRange]*loopFlowRange
+
+func (ranges loopIteratorRanges) occurrence(rng *loopFlowRange) *loopFlowRange {
+	if ranges[rng] == nil {
+		copy := *rng
+		copy.entry = loopIteratorEntry(rng.stmt.X)
+		copy.key, copy.value = &loopVariable{}, &loopVariable{}
+		ranges[rng] = &copy
+	}
+	return ranges[rng]
+}
+
+func (e *loopIteratorExpansion) clone(finish *cfg.Block, stopped bool) map[*cfg.Block]*cfg.Block {
+	selected := e.reachable
+	if stopped {
+		selected = e.stoppedReachable
+	}
+	mapping := map[*cfg.Block]*cfg.Block{}
+	ranges := loopIteratorRanges{}
+	for _, block := range e.iterator.Blocks {
+		if selected[block] {
+			mapping[block] = e.cloneBlock(block, ranges)
+		}
+	}
+	for _, block := range e.iterator.Blocks {
+		if copy := mapping[block]; copy != nil {
+			e.cloneEdges(block, copy, mapping, finish)
+		}
+	}
+	return mapping
+}
+
+func (e *loopIteratorExpansion) cloneBlock(block *cfg.Block, ranges loopIteratorRanges) *cfg.Block {
+	a := e.a
+	copy := loopIteratorBlock(e.graph, nil)
+	if ret := block.Return(); ret != nil {
+		if a.deferred != nil {
+			// Do NOT hide this ReturnStmt yet: a nested range must
+			// recognize its callback return and unwind before completion.
+			copy.Nodes = []ast.Node{ret}
+			a.deferred.markers[ret] = loopDeferredMarker{owner: e.it.lit, result: ret}
+		}
+		return copy
+	}
+	if _, suspend := e.atYield[block]; suspend {
+		return copy // normal yields are installed below; stopped yields panic
+	}
+	for _, node := range block.Nodes {
+		if rng := a.entries[node]; rng != nil {
+			rng = ranges.occurrence(rng)
+			node = rng.entry
+			a.entries[node] = rng
+			if rng.iterator != nil {
+				a.iterators = append(a.iterators, &loopFlowIterator{rng: rng, lit: rng.iterator, entry: copy})
+			}
+		} else if rng := a.steps[node]; rng != nil {
+			step := *node.(*ast.AssignStmt)
+			node = &step
+			a.steps[node] = ranges.occurrence(rng)
+		}
+		copy.Nodes = append(copy.Nodes, node)
+	}
+	return copy
+}
+
+func (e *loopIteratorExpansion) cloneEdges(block, copy *cfg.Block, mapping map[*cfg.Block]*cfg.Block, finish *cfg.Block) {
+	if ret := block.Return(); ret != nil {
+		completion := finish
+		if e.a.deferred != nil {
+			completion = loopIteratorBlock(e.graph, []ast.Node{e.a.deferred.pendingExit(ret, e.it.lit)}, finish)
+		}
+		copy.Succs = []*cfg.Block{completion}
+	} else if _, suspend := e.atYield[block]; !suspend {
+		for _, next := range block.Succs {
+			copy.Succs = append(copy.Succs, mapping[next])
+		}
+	}
+}
+
+// enterYields turns each reachable yield in the normal copy into an entry to
+// the shared range body, and returns the true resume point joining them.
+func (e *loopIteratorExpansion) enterYields(normal map[*cfg.Block]*cfg.Block) *cfg.Block {
+	trueResume := loopIteratorBlock(e.graph, nil)
+	for _, point := range e.yields {
+		normal[point.block].Nodes, normal[point.block].Succs = e.yieldSnapshot(point.call), []*cfg.Block{e.body}
+		trueResume.Succs = append(trueResume.Succs, normal[point.yes])
+	}
+	return trueResume
+}
+
+// Snapshot synchronous yield operands before entering the callback.
+func (e *loopIteratorExpansion) yieldSnapshot(call *ast.CallExpr) []ast.Node {
+	var lhs []ast.Expr
+	for i, slot := range []*loopVariable{e.it.rng.key, e.it.rng.value} {
+		if i >= len(call.Args) {
+			break
+		}
+		id := &ast.Ident{NamePos: call.Pos(), Name: "_yield"}
+		e.a.index.ids[id] = slot
+		lhs = append(lhs, id)
+	}
+	if len(lhs) == 0 {
+		return nil
+	}
+	return []ast.Node{&ast.AssignStmt{Lhs: lhs, Tok: token.ASSIGN, Rhs: call.Args}}
+}
+
+// resumeExits redirects each callback exit: continue and fallthrough resume
+// the iterator with true, break and return resume it with false.
+func (e *loopIteratorExpansion) resumeExits(trueResume *cfg.Block) {
+	e.falseResumes = map[*cfg.Block]*cfg.Block{}
+	for _, out := range e.exits {
+		resume := trueResume
+		if out.to != e.header {
+			resume = e.falseResume(e.finish(out))
+		}
+		if out.edge < 0 {
+			out.from.Succs = []*cfg.Block{resume}
+		} else {
+			out.from.Succs[out.edge] = resume
+		}
+	}
+}
+
+// finish is where a stopped iterator completes for out: its own target, or
+// the shared pending return for returns without one.
+func (e *loopIteratorExpansion) finish(out loopIteratorExit) *cfg.Block {
+	if out.to != nil {
+		return out.to
+	}
+	if e.pendingReturn == nil {
+		var nodes []ast.Node
+		if e.a.deferred != nil {
+			nodes = []ast.Node{e.a.deferred.pendingExit(out.from.Return(), e.a.owner)}
+		}
+		e.pendingReturn = loopIteratorBlock(e.graph, nodes)
+	}
+	return e.pendingReturn
+}
+
+// falseResume clones one stopped copy per finish, shared by its exits.
+func (e *loopIteratorExpansion) falseResume(finish *cfg.Block) *cfg.Block {
+	if resume := e.falseResumes[finish]; resume != nil {
+		return resume
+	}
+	stopped := e.clone(finish, true)
+	resume := loopIteratorBlock(e.graph, nil)
+	for _, point := range e.yields {
+		resume.Succs = append(resume.Succs, stopped[point.no])
+	}
+	e.falseResumes[finish] = resume
+	return resume
+}

@@ -1,6 +1,7 @@
 package diago
 
 import (
+	"fmt"
 	"go/ast"
 	"go/importer"
 	"go/parser"
@@ -8,6 +9,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -67,7 +69,7 @@ func ignoredCallFindings(t *testing.T, source string) []ASTFinding {
 	return findings
 }
 
-func TestIgnoredCallRequiresExactAdjacentRuleDirective(t *testing.T) {
+func TestIgnoredCallDirective(t *testing.T) {
 	findings := ignoredCallFindings(t, `package sample
 func save() error { return nil }
 func unsuppressed() { _ = save() }
@@ -184,55 +186,86 @@ func TestABCDEFGHIJKLMNOPQRSTUVWXY123456(t *testing.T) {}
 	})
 }
 
-func TestLargePackageFinding(t *testing.T) {
+func TestLargeFileFinding(t *testing.T) {
 	tests := []struct {
-		name        string
-		files       int
-		funcs       int
-		wantFinding bool
-		wantMessage string
+		name      string
+		lines     int
+		isTest    bool
+		generated bool
+		want      string
 	}{
-		{name: "limits are allowed", files: 50, funcs: 1000},
-		{
-			name:        "file count above limit is reported",
-			files:       51,
-			funcs:       100,
-			wantFinding: true,
-			wantMessage: "package has 51 files and 100 funcs",
-		},
-		{
-			name:        "function count above limit is reported",
-			files:       10,
-			funcs:       1001,
-			wantFinding: true,
-			wantMessage: "package has 10 files and 1001 funcs",
-		},
-		{name: "values below limits are allowed", files: 10, funcs: 100},
+		{name: "old limit allowed", lines: 1001},
+		{name: "below limit", lines: 4999},
+		{name: "at limit", lines: 5000},
+		{name: "above limit", lines: 5001, want: "high"},
+		{name: "at critical boundary", lines: 7500, want: "high"},
+		{name: "above critical boundary", lines: 7501, want: "critical"},
+		{name: "test file exempt", lines: 10000, isTest: true},
+		{name: "generated file exempt", lines: 10000, generated: true},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			ctx := astContext{
+				pkg:  goListPackage{ImportPath: "example.com/sample"},
+				path: "sample.go", isTest: tc.isTest, generated: tc.generated,
+			}
 			var findings []ASTFinding
-			appendLargePackageFinding(&findings, "/repo/sample", packageStats{
-				importPath: "example.com/sample",
-				files:      tc.files,
-				funcs:      tc.funcs,
-			})
-
-			if !tc.wantFinding {
+			appendLargeFileFinding(&findings, ctx, tc.lines)
+			if tc.want == "" {
 				if len(findings) != 0 {
-					t.Fatalf("got unexpected findings: %+v", findings)
+					t.Fatalf("unexpected findings: %+v", findings)
 				}
 				return
 			}
 			if len(findings) != 1 {
 				t.Fatalf("got %d findings, want 1: %+v", len(findings), findings)
 			}
-			finding := findings[0]
-			if finding.Rule != "large-package" || finding.Severity != "medium" || finding.Message != tc.wantMessage {
-				t.Fatalf("unexpected finding: %+v", finding)
+			f := findings[0]
+			if f.Rule != "large-file" || f.Severity != tc.want || f.File != ctx.path || f.Line != 1 || f.Message != fmt.Sprintf("file has %d lines", tc.lines) {
+				t.Fatalf("unexpected finding: %+v", f)
 			}
 		})
+	}
+}
+
+func TestFileLineLimit(t *testing.T) {
+	for _, lines := range []int{5000, 5001} {
+		for _, trailingNewline := range []bool{false, true} {
+			t.Run(fmt.Sprintf("lines=%d/trailing=%v", lines, trailingNewline), func(t *testing.T) {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/lines\n\ngo 1.22\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				source := "package sample\n" + strings.Repeat("// padding\n", lines-1)
+				if !trailingNewline {
+					source = strings.TrimSuffix(source, "\n")
+				}
+				path := filepath.Join(dir, "sample.go")
+				if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if got := fileLineCount(path); got != lines {
+					t.Fatalf("fileLineCount = %d, want %d", got, lines)
+				}
+				findings, err := AnalyzeAST(dir, "./...")
+				if err != nil {
+					t.Fatal(err)
+				}
+				var largeFiles []ASTFinding
+				for _, f := range findings {
+					if f.Rule == "large-file" {
+						largeFiles = append(largeFiles, f)
+					}
+				}
+				if lines == 5000 {
+					if len(largeFiles) != 0 {
+						t.Fatalf("5000 lines should be allowed: %+v", largeFiles)
+					}
+				} else if len(largeFiles) != 1 || largeFiles[0].Message != "file has 5001 lines" {
+					t.Fatalf("expected finding for 5001 lines: %+v", largeFiles)
+				}
+			})
+		}
 	}
 }
 
@@ -675,7 +708,7 @@ func closeCustom() { resource, _ := acquire(); _ = resource.Close() }
 	}
 }
 
-func TestGeneratedExportsDoNotCountAsHandWrittenSurface(t *testing.T) {
+func TestGenExportsSurface(t *testing.T) {
 	generated := parseLiteralTestFile(t, `package sample
 type GeneratedOne struct{}
 func GeneratedTwo() {}`)
@@ -770,7 +803,7 @@ func dangerousCallFindings(t *testing.T, source string) []ASTFinding {
 	return findings
 }
 
-func TestSwallowedErrorRequiresExplicitRuleDirective(t *testing.T) {
+func TestSwallowedErrDirective(t *testing.T) {
 	source := `package sample
 func lookup() error { return nil }
 func unsuppressed() error {
@@ -859,5 +892,259 @@ func TestExternalTestsCountAsTests(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected untested-exported-surface finding when no test files exist")
+	}
+}
+
+func loopFindings(t *testing.T, source string) []ASTFinding {
+	t.Helper()
+	return loopFindingsWithTypes(t, source, true)
+}
+
+func loopFindingsNoTypes(t *testing.T, source string) []ASTFinding {
+	t.Helper()
+	return loopFindingsWithTypes(t, source, false)
+}
+
+func loopFindingsWithTypes(t *testing.T, source string, withTypes bool) []ASTFinding {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sample.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var info *types.Info
+	if withTypes {
+		info = &types.Info{
+			Types:      make(map[ast.Expr]types.TypeAndValue),
+			Defs:       make(map[*ast.Ident]types.Object),
+			Uses:       make(map[*ast.Ident]types.Object),
+			Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		}
+		conf := types.Config{Importer: importer.Default()}
+		_, _ = conf.Check("example.com/sample", fset, []*ast.File{file}, info)
+	}
+	ctx := astContext{
+		pkg:  goListPackage{ImportPath: "example.com/sample"},
+		fset: fset, path: "sample.go", types: info,
+	}
+	var findings []ASTFinding
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+			analyzeFunc(&findings, ctx, fn)
+		}
+	}
+	var out []ASTFinding
+	for _, f := range findings {
+		if f.Rule == "defer-in-loop" || f.Rule == "goroutine-in-loop" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func countRules(findings []ASTFinding) map[string]int {
+	m := map[string]int{}
+	for _, f := range findings {
+		m[f.Rule]++
+	}
+	return m
+}
+
+func TestLoops(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   map[string]int
+	}{
+		{
+			name: "defer in goroutine is per-goroutine not per-iteration",
+			source: `package sample
+import "sync"
+func work() {
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_ = i
+		}(i)
+	}
+	wg.Wait()
+}`,
+			want: map[string]int{},
+		},
+		{
+			name: "defer with no loop at all",
+			source: `package sample
+func work() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+	}()
+	<-done
+}`,
+			want: map[string]int{},
+		},
+		{
+			name: "direct defer in loop still flags",
+			source: `package sample
+func work() {
+	for i := 0; i < 10; i++ {
+		defer work()
+	}
+}`,
+			want: map[string]int{"defer-in-loop": 1},
+		},
+		{
+			name: "uncaptured goroutine does not flag",
+			source: `package sample
+func work() {
+	for i := 0; i < 10; i++ {
+		go func() {}()
+		_ = i
+	}
+}`,
+			want: map[string]int{},
+		},
+		{
+			name: "true loop capture still flags",
+			source: `package sample
+func work() {
+	for i := 0; i < 10; i++ {
+		go func() {
+			_ = i
+		}()
+	}
+}`,
+			want: map[string]int{"goroutine-in-loop": 1},
+		},
+		{
+			name: "inner loop inside goroutine still flags its defer",
+			source: `package sample
+func work() {
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 10; j++ {
+				defer work()
+				_ = j
+			}
+		}()
+		_ = i
+	}
+}`,
+			want: map[string]int{"defer-in-loop": 1},
+		},
+		{
+			name: "value arg is immediate not capture",
+			source: `package sample
+func foo(v int) {}
+func work() {
+	for i := 0; i < 10; i++ {
+		go foo(i)
+	}
+}`,
+			want: map[string]int{},
+		},
+		{
+			name: "address of loop var escapes",
+			source: `package sample
+func foo(v *int) {}
+func work() {
+	for i := 0; i < 10; i++ {
+		go foo(&i)
+	}
+}`,
+			want: map[string]int{"goroutine-in-loop": 1},
+		},
+		{
+			name: "named func value capturing flags",
+			source: `package sample
+func work() {
+	for i := 0; i < 10; i++ {
+		f := func() { _ = i }
+		go f()
+		_ = f
+	}
+}`,
+			want: map[string]int{"goroutine-in-loop": 1},
+		},
+		{
+			name: "copy idiom shadows",
+			source: `package sample
+func work() {
+	for i := 0; i < 10; i++ {
+		i := i
+		go func() { _ = i }()
+	}
+}`,
+			want: map[string]int{},
+		},
+		{
+			name: "wrapper param shadows",
+			source: `package sample
+func work() {
+	for i := 0; i < 10; i++ {
+		func(i int) {
+			go func() { _ = i }()
+		}(i)
+	}
+}`,
+			want: map[string]int{},
+		},
+		{
+			name: "var-less loop has no capture",
+			source: `package sample
+func work() {
+	for {
+		go work()
+	}
+}`,
+			want: map[string]int{},
+		},
+		{
+			name: "cond loop with outer capture flags",
+			source: `package sample
+func work() {
+	i := 0
+	for i < 10 {
+		go func() { _ = i }()
+		i++
+	}
+}`,
+			want: map[string]int{"goroutine-in-loop": 1},
+		},
+		{
+			name: "nested arg closure executes synchronously",
+			source: `package sample
+func foo(v int) {}
+func bar(f func()) int { f(); return 0 }
+func work(xs []int) {
+	for i := range xs {
+		go foo(bar(func() { _ = i }))
+	}
+}`,
+			want: map[string]int{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, withTypes := range []bool{true, false} {
+				var got []ASTFinding
+				if withTypes {
+					got = loopFindings(t, tc.source)
+				} else {
+					got = loopFindingsNoTypes(t, tc.source)
+				}
+				gotMap := countRules(got)
+				if len(gotMap) != len(tc.want) {
+					t.Fatalf("types=%v got %v, want %v: %+v", withTypes, gotMap, tc.want, got)
+				}
+				for rule, n := range tc.want {
+					if gotMap[rule] != n {
+						t.Fatalf("types=%v rule %s got %d, want %d: %+v", withTypes, rule, gotMap[rule], n, got)
+					}
+				}
+			}
+		})
 	}
 }

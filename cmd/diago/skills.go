@@ -75,46 +75,71 @@ func installClaude(dir string, project, force bool) error {
 	if err != nil {
 		return err
 	}
-	written := 0
-	err = fs.WalkDir(skillsFS, skillsRoot, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if path == skillsRoot {
-			return nil
-		}
-		rel, err := filepath.Rel(skillsRoot, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dest, rel)
-		if entry.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		if !force {
-			if _, statErr := os.Stat(target); statErr == nil {
-				return fmt.Errorf("%s already exists (use -force to overwrite)", target)
-			}
-		}
-		data, err := skillsFS.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(target, data, 0o644); err != nil {
-			return err
-		}
-		written++
-		return nil
-	})
+	c := cloner{dest: dest, force: force}
+	if err := fs.WalkDir(skillsFS, skillsRoot, c.walk); err != nil {
+		return err
+	}
+	fmt.Printf("installed %d file(s) into %s\n", c.n, dest)
+	fmt.Println("restart Claude Code (or reload skills) to pick up the new skill.")
+	return nil
+}
+
+type cloner struct {
+	dest  string
+	force bool
+	n     int
+}
+
+func (c *cloner) walk(path string, entry fs.DirEntry, err error) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("installed %d file(s) into %s\n", written, dest)
-	fmt.Println("restart Claude Code (or reload skills) to pick up the new skill.")
+	if path == skillsRoot {
+		return nil
+	}
+	rel, err := filepath.Rel(skillsRoot, path)
+	if err != nil {
+		return err
+	}
+	if entry.IsDir() {
+		return os.MkdirAll(filepath.Join(c.dest, rel), 0o755)
+	}
+	wrote, err := copyEntry(c.dest, path, rel, c.force)
+	if err != nil {
+		return err
+	}
+	if wrote {
+		c.n++
+	}
 	return nil
+}
+
+func copyEntry(dest, src, rel string, force bool) (bool, error) {
+	target := filepath.Join(dest, rel)
+	if !force {
+		if _, statErr := os.Stat(target); statErr == nil {
+			return false, fmt.Errorf("%s already exists (use -force to overwrite)", target)
+		}
+	}
+	data, err := skillsFS.ReadFile(src)
+	if err != nil {
+		return false, err
+	}
+	if err := ensureParent(target); err != nil {
+		return false, err
+	}
+	if err := writeOne(target, data); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func ensureParent(p string) error {
+	return os.MkdirAll(filepath.Dir(p), 0o755)
+}
+
+func writeOne(p string, data []byte) error {
+	return os.WriteFile(p, data, 0o644)
 }
 
 // installAgents writes the diago doc to <base>/.agents/diago.md and adds a
