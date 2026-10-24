@@ -471,91 +471,125 @@ func (p *loopDeferredPlan) transfer(node ast.Node, w *loopWalk, aliases func(ast
 // dependency on the source variable's mutable slot. A closure's captures remain
 // real variable dependencies and therefore retain their EXIT-time bindings.
 func (p *loopDeferredPlan) live(node ast.Node, symbolic *loopWalk, aliases func(ast.Expr, *loopWalk) loopValue) (uses, defs map[*loopVariable]bool, dependencies map[*loopVariable]loopValue) {
-	d := p.flow
-	uses, defs = map[*loopVariable]bool{}, map[*loopVariable]bool{}
-	dependencies = map[*loopVariable]loopValue{}
-	if marker, ok := d.markers[node]; ok && marker.entry {
-		o := d.owner(marker.owner)
-		defs[o.top] = true
-		if !p.persistent {
-			for _, s := range o.slots {
-				for _, slot := range s.storage() {
-					defs[slot] = true
-				}
-			}
-		}
+	eq := &loopDeferredEquations{uses: map[*loopVariable]bool{}, defs: map[*loopVariable]bool{}, dependencies: map[*loopVariable]loopValue{}}
+	if marker, ok := p.flow.markers[node]; ok && marker.entry {
+		p.liveEntry(eq, marker.owner)
 	}
 	if ret, results, ok := p.returnInfo(node); ok {
 		if _, exits := p.exits[node]; exits {
-			for _, v := range results {
-				if v != nil {
-					uses[v] = true
-				}
-			}
+			eq.use(results)
 		}
 		if ret != nil && len(ret.Results) != 0 && !p.returns[node].completionOnly {
-			for i, v := range results {
-				if v == nil {
-					continue
-				}
-				defs[v], defs[d.companion(v)] = true, true
-				if slot := d.aliases[v]; slot != nil {
-					defs[slot] = true
-				}
-				if i < len(ret.Results) {
-					dependencies[v] = d.s.value(ret.Results[i], symbolic)
-				}
-			}
+			p.liveResultAssignments(eq, ret, results, symbolic)
 		}
 	}
 	if exit, ok := p.exits[node]; ok {
-		o := d.owner(exit.owner)
-		uses[o.top] = true
-		if !p.persistent {
-			for _, s := range o.slots {
-				for _, slot := range p.storage(s) {
-					uses[slot] = true
-				}
-				for v := range d.s.index.captures[p.static[s].literal] {
-					uses[v] = true // free cells are loaded now, never hoisted values
-				}
-			}
-		}
+		p.liveExit(eq, exit.owner)
 	}
 	if stmt, ok := node.(*ast.DeferStmt); ok {
-		s := d.slot(stmt)
-		o := d.owner(s.owner)
-		uses[o.top], defs[o.top] = true, true
-		dependencies[s.callee] = d.s.value(stmt.Call.Fun, symbolic)
-		// Origins are metadata. Keep their source companion live directly;
-		// they must not pollute the saved callee's executable capture modes.
-		originUse := func(expr ast.Expr) {
-			if id, ok := loopUnparen(expr).(*ast.Ident); ok {
-				if v := d.s.index.ids[id]; v != nil {
-					uses[d.companion(v)] = true
-				}
-			}
-		}
-		originUse(stmt.Call.Fun)
-		for i, arg := range stmt.Call.Args {
-			dependencies[s.args[i]] = d.s.value(arg, symbolic)
-			if aliases != nil {
-				dependencies[s.addresses[i]] = aliases(arg, symbolic)
-			}
-			originUse(arg)
-		}
-		if p.persistent {
-			// The tree keeps operand VALUES independently of source-cell
-			// liveness. Its reference dependencies still load EXIT-time cells.
-			// Use one owner root, not one liveness root per saved operand.
-			value := loopValue{}
-			for _, contents := range dependencies {
-				loopMerge(value, contents)
-			}
-			dependencies = map[*loopVariable]loopValue{o.top: value}
+		p.liveRegistration(eq, stmt, symbolic, aliases)
+	}
+	return eq.uses, eq.defs, eq.dependencies
+}
+
+// loopDeferredEquations accumulates one node's deferred liveness equations.
+type loopDeferredEquations struct {
+	uses, defs   map[*loopVariable]bool
+	dependencies map[*loopVariable]loopValue
+}
+
+// use marks vars live, skipping blank results, which have no storage.
+func (eq *loopDeferredEquations) use(vars []*loopVariable) {
+	for _, v := range vars {
+		if v != nil {
+			eq.uses[v] = true
 		}
 	}
-	return
+}
+
+// liveEntry defines the owner's fresh top and, unfactored, every registration slot.
+func (p *loopDeferredPlan) liveEntry(eq *loopDeferredEquations, owner *ast.FuncLit) {
+	o := p.flow.owner(owner)
+	eq.defs[o.top] = true
+	if !p.persistent {
+		for _, s := range o.slots {
+			for _, slot := range s.storage() {
+				eq.defs[slot] = true
+			}
+		}
+	}
+}
+
+// liveResultAssignments defines the named results a return assigns, depending
+// on the symbolic contents of their operands.
+func (p *loopDeferredPlan) liveResultAssignments(eq *loopDeferredEquations, ret *ast.ReturnStmt, results []*loopVariable, symbolic *loopWalk) {
+	d := p.flow
+	for i, v := range results {
+		if v == nil {
+			continue
+		}
+		eq.defs[v], eq.defs[d.companion(v)] = true, true
+		if slot := d.aliases[v]; slot != nil {
+			eq.defs[slot] = true
+		}
+		if i < len(ret.Results) {
+			eq.dependencies[v] = d.s.value(ret.Results[i], symbolic)
+		}
+	}
+}
+
+// liveExit uses the owner's pending stack and, unfactored, every saved slot
+// and captured cell its registrations may run with.
+func (p *loopDeferredPlan) liveExit(eq *loopDeferredEquations, owner *ast.FuncLit) {
+	o := p.flow.owner(owner)
+	eq.uses[o.top] = true
+	if !p.persistent {
+		for _, s := range o.slots {
+			for _, slot := range p.storage(s) {
+				eq.uses[slot] = true
+			}
+			for v := range p.flow.s.index.captures[p.static[s].literal] {
+				eq.uses[v] = true // free cells are loaded now, never hoisted values
+			}
+		}
+	}
+}
+
+// liveRegistration reads and redefines the owner's top and depends on the
+// operands it saves.
+func (p *loopDeferredPlan) liveRegistration(eq *loopDeferredEquations, stmt *ast.DeferStmt, symbolic *loopWalk, aliases func(ast.Expr, *loopWalk) loopValue) {
+	d := p.flow
+	s := d.slot(stmt)
+	o := d.owner(s.owner)
+	eq.uses[o.top], eq.defs[o.top] = true, true
+	eq.dependencies[s.callee] = d.s.value(stmt.Call.Fun, symbolic)
+	// Origins are metadata. Keep their source companion live directly;
+	// they must not pollute the saved callee's executable capture modes.
+	originUse := func(expr ast.Expr) {
+		if id, ok := loopUnparen(expr).(*ast.Ident); ok {
+			if v := d.s.index.ids[id]; v != nil {
+				eq.uses[d.companion(v)] = true
+			}
+		}
+	}
+	originUse(stmt.Call.Fun)
+	for i, arg := range stmt.Call.Args {
+		eq.dependencies[s.args[i]] = d.s.value(arg, symbolic)
+		if aliases != nil {
+			eq.dependencies[s.addresses[i]] = aliases(arg, symbolic)
+		}
+		originUse(arg)
+	}
+	if p.persistent {
+		// The tree keeps operand VALUES independently of source-cell
+		// liveness. Its reference dependencies still load EXIT-time cells.
+		// Use one owner root, not one liveness root per saved operand.
+		value := loopValue{}
+		for _, contents := range eq.dependencies {
+			loopMerge(value, contents)
+		}
+		eq.dependencies = map[*loopVariable]loopValue{o.top: value}
+	}
 }
 
 // companionDependencies must run before transitive liveness closure. Also pass
@@ -675,6 +709,15 @@ type loopDeferredEvents struct {
 	done    map[*ast.DeferStmt]bool
 }
 
+// slotsByToken indexes the owner's registrations by their activation token.
+func (o *loopDeferredOwner) slotsByToken() map[*loopVariable]*loopDeferredSlot {
+	byToken := map[*loopVariable]*loopDeferredSlot{}
+	for _, s := range o.slots {
+		byToken[s.token] = s
+	}
+	return byToken
+}
+
 func (p *loopDeferredPlan) events(node ast.Node, w *loopWalk) loopDeferredEvents {
 	events := loopDeferredEvents{next: map[*ast.DeferStmt][]*ast.DeferStmt{}, done: map[*ast.DeferStmt]bool{}}
 	exit, ok := p.exits[node]
@@ -682,10 +725,7 @@ func (p *loopDeferredPlan) events(node ast.Node, w *loopWalk) loopDeferredEvents
 		return events
 	}
 	o := p.flow.owner(exit.owner)
-	byToken := map[*loopVariable]*loopDeferredSlot{}
-	for _, s := range o.slots {
-		byToken[s.token] = s
-	}
+	byToken := o.slotsByToken()
 	var queue []*loopDeferredSlot
 	for token := range w.values[o.top] {
 		if s := byToken[token]; s != nil {
@@ -741,10 +781,7 @@ func (p *loopDeferredPlan) executeExit(node ast.Node, w *loopWalk, aliasSlot fun
 	}
 	d := p.flow
 	o := d.owner(exit.owner)
-	byToken := map[*loopVariable]*loopDeferredSlot{}
-	for _, s := range o.slots {
-		byToken[s.token] = s
-	}
+	byToken := o.slotsByToken()
 	// Factor ALL owners' hidden storage, not just this owner's: iterator exits
 	// may execute while a large enclosing stack is pending. Source-cell updates
 	// are the only runner writebacks, so this table remains shared and immutable.
@@ -755,98 +792,127 @@ func (p *loopDeferredPlan) executeExit(node ast.Node, w *loopWalk, aliasSlot fun
 			bindings[v] = value
 		}
 	}
-	inputs := map[*loopVariable]map[*loopVariable]loopValue{}
-	queue := []*loopVariable{}
-	queued := map[*loopVariable]bool{}
-	push := func(token *loopVariable, state map[*loopVariable]loopValue) {
-		first := inputs[token] == nil
-		changed := false
-		if first {
-			// Event inputs are immutable. A linear stack with no binding
-			// changes can share ONE source-cell map across every event too.
-			inputs[token] = state
-		} else {
-			inputs[token], changed = loopDeferredJoinBindings(inputs[token], state)
-		}
-		if (first || changed) && !queued[token] {
-			queue = append(queue, token)
-			queued[token] = true
-		}
-	}
-	if len(w.values[o.top]) == 0 {
-		push(o.bottom, bindings)
-	}
-	for token := range w.values[o.top] {
-		push(token, bindings)
-	}
-	for len(queue) != 0 {
-		token := queue[0]
-		queue = queue[1:]
-		queued[token] = false
+	events := &loopDeferredExitQueue{inputs: map[*loopVariable]map[*loopVariable]loopValue{}, queued: map[*loopVariable]bool{}}
+	events.pushStack(w.values[o.top], o.bottom, bindings)
+	for len(events.queue) != 0 {
+		token := events.pop()
 		s := byToken[token]
 		if s == nil {
 			continue
 		}
-		input := inputs[token]
-		var output map[*loopVariable]loopValue
-		completed := false
-		for _, inv := range p.savedInvocations(s, input, saved, aliasSlot) {
-			next := input
-			if run != nil {
-				if result := run(inv, loopCloneValues(input), false); result != nil {
-					next = result
-				}
-			}
-			if len(next[d.blocked]) != 0 {
-				continue
-			}
-			if loopContextBindingsEqual(input, next) {
-				next = input
-			}
-			if !completed {
-				output = next
-			} else {
-				output, _ = loopDeferredJoinBindings(output, next)
-			}
-			completed = true
-		}
-		if !completed {
-			continue
-		}
-		previous := p.previous(s, saved)
-		if len(previous) == 0 {
-			push(o.bottom, output)
-		}
-		for older := range previous {
-			push(older, output)
+		if output, completed := p.runInvocations(s, events.inputs[token], saved, aliasSlot, run); completed {
+			events.pushStack(p.previous(s, saved), o.bottom, output)
 		}
 	}
 	if replay && run != nil {
-		for token, input := range inputs {
-			if s := byToken[token]; s != nil {
-				for _, inv := range p.savedInvocations(s, input, saved, aliasSlot) {
-					run(inv, loopCloneValues(input), true)
-				}
-			}
-		}
+		p.replayInvocations(byToken, events.inputs, saved, aliasSlot, run)
 	}
-	if result := inputs[o.bottom]; result != nil {
-		completed := &loopWalk{values: loopCloneValues(result), persistentDeferred: w.persistentDeferred, deferredBindings: w.deferredBindings}
-		for v, value := range w.values {
-			if d.savedSlots[v] {
-				_, operand := d.savedIDs[v]
-				if !w.persistentDeferred || !operand {
-					completed.values[v] = value
-				}
-			}
-		}
-		d.enter(exit.owner, completed) // this invocation's registrations are consumed
-		w.deferredBindings = completed.deferredBindings
-		return completed.values
+	if result := events.inputs[o.bottom]; result != nil {
+		return p.completeExit(exit.owner, w, result)
 	}
 	// A pure cycle denotes no completed exit (e.g. an unbounded registration
 	// loop). Do not manufacture a result-copy access after a non-returning path.
 	return nil
+}
+
+// loopDeferredExitQueue is executeExit's worklist over saved-stack tokens.
+// inputs holds each event's joined input state; a token is queued again only
+// when its input changes.
+type loopDeferredExitQueue struct {
+	inputs map[*loopVariable]map[*loopVariable]loopValue
+	queue  []*loopVariable
+	queued map[*loopVariable]bool
+}
+
+func (q *loopDeferredExitQueue) push(token *loopVariable, state map[*loopVariable]loopValue) {
+	first := q.inputs[token] == nil
+	changed := false
+	if first {
+		// Event inputs are immutable. A linear stack with no binding
+		// changes can share ONE source-cell map across every event too.
+		q.inputs[token] = state
+	} else {
+		q.inputs[token], changed = loopDeferredJoinBindings(q.inputs[token], state)
+	}
+	if (first || changed) && !q.queued[token] {
+		q.queue = append(q.queue, token)
+		q.queued[token] = true
+	}
+}
+
+// pushStack continues to every token on stack. An empty stack continues
+// directly to bottom, the result-copy phase.
+func (q *loopDeferredExitQueue) pushStack(stack loopValue, bottom *loopVariable, state map[*loopVariable]loopValue) {
+	if len(stack) == 0 {
+		q.push(bottom, state)
+	}
+	for token := range stack {
+		q.push(token, state)
+	}
+}
+
+func (q *loopDeferredExitQueue) pop() *loopVariable {
+	token := q.queue[0]
+	q.queue = q.queue[1:]
+	q.queued[token] = false
+	return token
+}
+
+// runInvocations runs each callee alternative of one registration from input
+// and joins the states of those that return. completed is false when every
+// alternative is blocked.
+func (p *loopDeferredPlan) runInvocations(s *loopDeferredSlot, input, saved map[*loopVariable]loopValue, aliasSlot func(*loopVariable) *loopVariable, run loopDeferredRunner) (output map[*loopVariable]loopValue, completed bool) {
+	for _, inv := range p.savedInvocations(s, input, saved, aliasSlot) {
+		next := input
+		if run != nil {
+			if result := run(inv, loopCloneValues(input), false); result != nil {
+				next = result
+			}
+		}
+		if len(next[p.flow.blocked]) != 0 {
+			continue
+		}
+		if loopContextBindingsEqual(input, next) {
+			next = input
+		}
+		if !completed {
+			output = next
+		} else {
+			output, _ = loopDeferredJoinBindings(output, next)
+		}
+		completed = true
+	}
+	return output, completed
+}
+
+// replayInvocations runs each reached registration once more at its converged
+// event input, with replay=true.
+func (p *loopDeferredPlan) replayInvocations(byToken map[*loopVariable]*loopDeferredSlot, inputs map[*loopVariable]map[*loopVariable]loopValue, saved map[*loopVariable]loopValue, aliasSlot func(*loopVariable) *loopVariable, run loopDeferredRunner) {
+	for token, input := range inputs {
+		if s := byToken[token]; s != nil {
+			for _, inv := range p.savedInvocations(s, input, saved, aliasSlot) {
+				run(inv, loopCloneValues(input), true)
+			}
+		}
+	}
+}
+
+// completeExit restores the walk's hidden storage onto the bindings after all
+// defers. Persistent operands stay in the shared deferred tree.
+func (p *loopDeferredPlan) completeExit(owner *ast.FuncLit, w *loopWalk, result map[*loopVariable]loopValue) map[*loopVariable]loopValue {
+	d := p.flow
+	completed := &loopWalk{values: loopCloneValues(result), persistentDeferred: w.persistentDeferred, deferredBindings: w.deferredBindings}
+	for v, value := range w.values {
+		if d.savedSlots[v] {
+			_, operand := d.savedIDs[v]
+			if !w.persistentDeferred || !operand {
+				completed.values[v] = value
+			}
+		}
+	}
+	d.enter(owner, completed) // this invocation's registrations are consumed
+	w.deferredBindings = completed.deferredBindings
+	return completed.values
 }
 
 // returnInfo also works for iterator markers whose original ReturnStmt was
@@ -969,10 +1035,60 @@ func (e *loopFlowEffects) recordOpaqueDeferredInvocation(inv loopDeferredInvocat
 // per original point, not a product of all registrations' active bitsets.
 func loopDeferredGuardGraph(original loopSyncEscapeFrame, registrations, resets []int) (loopSyncEscapeFrame, [][2]int) {
 	source := original.graph
-	mapping := make([][2]int, len(source.points))
+	g := &loopConflictFrame{
+		nodes: map[ast.Node][]int{}, gos: map[*ast.GoStmt]int{}, effects: map[int][]loopDirectAccess{},
+		copies: map[*loopVariable][]int{}, births: map[*loopVariable][]int{}, iterations: map[*loopVariable][]int{},
+	}
+	out := loopSyncEscapeFrame{graph: g}
+	mapping := newLoopDeferredGuardMapping(len(source.points))
+	if len(source.points) == 0 {
+		return out, mapping
+	}
+	mapping.explore(source, g, registrations, resets)
+	for node, oldPoints := range source.nodes {
+		for _, old := range oldPoints {
+			g.nodes[node] = append(g.nodes[node], mapping.points(old)...)
+		}
+	}
+	for stmt, old := range source.gos {
+		if ps := mapping.points(old); len(ps) != 0 {
+			g.gos[stmt] = ps[0]
+		}
+	}
+	for old, accesses := range source.effects {
+		for _, point := range mapping.points(old) {
+			g.effects[point] = append(g.effects[point], accesses...)
+		}
+	}
+	mapping.remapVariables(g.copies, source.copies)
+	mapping.remapVariables(g.births, source.births)
+	mapping.remapVariables(g.iterations, source.iterations)
+	for _, launch := range original.launches {
+		for _, point := range mapping.points(launch.point) {
+			copy := launch
+			copy.point = point
+			out.launches = append(out.launches, copy)
+		}
+	}
+	return out, mapping
+}
+
+// loopDeferredGuardMapping maps each original point to its inactive [0] and
+// active [1] product points. -1 marks an unreached state.
+type loopDeferredGuardMapping [][2]int
+
+func newLoopDeferredGuardMapping(points int) loopDeferredGuardMapping {
+	mapping := make(loopDeferredGuardMapping, points)
 	for i := range mapping {
 		mapping[i] = [2]int{-1, -1}
 	}
+	return mapping
+}
+
+// explore adds a point and edges to g for each guard state reachable from the
+// entry. Leaving a registration point activates the guard; leaving a reset
+// point clears it unless the point also registers.
+func (m loopDeferredGuardMapping) explore(source, g *loopConflictFrame, registrations, resets []int) {
 	set, reset := map[int]bool{}, map[int]bool{}
 	for _, point := range registrations {
 		set[point] = true
@@ -980,22 +1096,14 @@ func loopDeferredGuardGraph(original loopSyncEscapeFrame, registrations, resets 
 	for _, point := range resets {
 		reset[point] = true
 	}
-	g := &loopConflictFrame{
-		nodes: map[ast.Node][]int{}, gos: map[*ast.GoStmt]int{}, effects: map[int][]loopDirectAccess{},
-		copies: map[*loopVariable][]int{}, births: map[*loopVariable][]int{}, iterations: map[*loopVariable][]int{},
-	}
-	out := loopSyncEscapeFrame{graph: g}
-	if len(source.points) == 0 {
-		return out, mapping
-	}
 	type state struct{ point, active int }
 	queue := []state{}
 	add := func(point, active int) int {
-		if mapping[point][active] < 0 {
-			mapping[point][active] = g.point()
+		if m[point][active] < 0 {
+			m[point][active] = g.point()
 			queue = append(queue, state{point, active})
 		}
-		return mapping[point][active]
+		return m[point][active]
 	}
 	add(0, 0)
 	for head := 0; head < len(queue); head++ {
@@ -1009,54 +1117,27 @@ func loopDeferredGuardGraph(original loopSyncEscapeFrame, registrations, resets 
 		}
 		for _, next := range source.points[current.point].next {
 			to := add(next, active)
-			g.edge(mapping[current.point][current.active], to)
+			g.edge(m[current.point][current.active], to)
 		}
 	}
-	points := func(old int) []int {
-		var out []int
-		for _, point := range mapping[old] {
-			if point >= 0 {
-				out = append(out, point)
-			}
+}
+
+// points lists the reached product points of an original point.
+func (m loopDeferredGuardMapping) points(old int) []int {
+	var out []int
+	for _, point := range m[old] {
+		if point >= 0 {
+			out = append(out, point)
 		}
-		return out
 	}
-	for node, oldPoints := range source.nodes {
+	return out
+}
+
+// remapVariables appends each variable's product points to dst.
+func (m loopDeferredGuardMapping) remapVariables(dst, src map[*loopVariable][]int) {
+	for v, oldPoints := range src {
 		for _, old := range oldPoints {
-			g.nodes[node] = append(g.nodes[node], points(old)...)
+			dst[v] = append(dst[v], m.points(old)...)
 		}
 	}
-	for stmt, old := range source.gos {
-		if ps := points(old); len(ps) != 0 {
-			g.gos[stmt] = ps[0]
-		}
-	}
-	for old, accesses := range source.effects {
-		for _, point := range points(old) {
-			g.effects[point] = append(g.effects[point], accesses...)
-		}
-	}
-	for v, oldPoints := range source.copies {
-		for _, old := range oldPoints {
-			g.copies[v] = append(g.copies[v], points(old)...)
-		}
-	}
-	for v, oldPoints := range source.births {
-		for _, old := range oldPoints {
-			g.births[v] = append(g.births[v], points(old)...)
-		}
-	}
-	for v, oldPoints := range source.iterations {
-		for _, old := range oldPoints {
-			g.iterations[v] = append(g.iterations[v], points(old)...)
-		}
-	}
-	for _, launch := range original.launches {
-		for _, point := range points(launch.point) {
-			copy := launch
-			copy.point = point
-			out.launches = append(out.launches, copy)
-		}
-	}
-	return out, mapping
 }
