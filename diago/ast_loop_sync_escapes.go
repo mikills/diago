@@ -25,135 +25,157 @@ import (
 // are ordinary synchronous calls. Call effects are indexed after operands and
 // projected launches will be inserted immediately after those effects.
 func (c *loopFlowConflicts) recordSyncNode(g *loopConflictFrame, node ast.Node, start int) int {
-	last := start
-	index := func(n ast.Node) {
-		g.nodes[n] = append(g.nodes[n], last)
-		if g.recording != nil {
-			g.recording.nodes[n] = append(g.recording.nodes[n], last)
-		}
-		for _, v := range c.births[n] {
-			g.births[v] = append(g.births[v], last)
-		}
+	r := &loopSyncRecorder{c: c, g: g, last: start}
+	r.visit(node)
+	return r.last
+}
+
+// loopSyncRecorder carries one recordSyncNode walk. Every event is indexed at
+// last, the CFG point the evaluation has reached.
+type loopSyncRecorder struct {
+	c    *loopFlowConflicts
+	g    *loopConflictFrame
+	last int
+}
+
+func (r *loopSyncRecorder) index(n ast.Node) {
+	r.g.nodes[n] = append(r.g.nodes[n], r.last)
+	if r.g.recording != nil {
+		r.g.recording.nodes[n] = append(r.g.recording.nodes[n], r.last)
 	}
-	var visit func(ast.Node)
-	// Locate destinations before the RHS, but index their eventual stores
-	// afterwards. Only pointer/header/index operands load values here; a
-	// struct/array root's identifier write is part of the later store too.
-	var address func(ast.Expr, *[]ast.Node)
-	address = func(expr ast.Expr, stores *[]ast.Node) {
-		if expr == nil {
-			return
-		}
-		switch n := expr.(type) {
-		case *ast.ParenExpr:
-			address(n.X, stores)
-		case *ast.Ident:
-		case *ast.StarExpr:
-			visit(n.X)
-		case *ast.SelectorExpr:
-			if c.s.pointerValue(n.X) {
-				visit(n.X)
-			} else {
-				address(n.X, stores)
-			}
-		case *ast.IndexExpr:
-			if c.s.referenceIndex(n.X) {
-				visit(n.X)
-			} else {
-				address(n.X, stores)
-			}
-			visit(n.Index)
-		default:
-			visit(expr)
-			return
-		}
-		*stores = append(*stores, expr)
+	for _, v := range r.c.births[n] {
+		r.g.births[v] = append(r.g.births[v], r.last)
 	}
-	operands := func(call *ast.CallExpr) {
-		if call == nil {
-			return
-		}
-		visit(call.Fun)
-		if c.s.deferredUnevaluated(call) {
-			return
-		}
-		for _, arg := range call.Args {
-			visit(arg)
-		}
+}
+
+func (r *loopSyncRecorder) visit(n ast.Node) {
+	if n == nil {
+		return
 	}
-	visit = func(n ast.Node) {
-		if n == nil {
-			return
-		}
-		switch n := n.(type) {
-		case *ast.FuncLit:
-			index(n)
-			return
-		case *ast.BinaryExpr:
-			if n.Op == token.LAND || n.Op == token.LOR {
-				visit(n.X)
-				left, known := c.s.deferredTruth(n.X)
-				skip := known && (n.Op == token.LAND && !left || n.Op == token.LOR && left)
-				if !skip {
-					before := last
-					if !known {
-						last = g.point()
-						g.edge(before, last)
-					}
-					visit(n.Y)
-					if !known {
-						join := g.point()
-						g.edge(last, join)
-						g.edge(before, join)
-						last = join
-					}
-				}
-				index(n)
-				return
-			}
-			loopChildren(n, visit)
-		case *ast.GoStmt:
-			operands(n.Call)
-		case *ast.DeferStmt:
-			operands(n.Call)
-		case *ast.CallExpr:
-			operands(n)
-			p := g.point()
-			g.edge(last, p)
-			last = p
-			index(n)
-			if g.recording != nil {
-				g.recording.calls = append(g.recording.calls, loopContextCall{call: n, point: p})
-			}
-			// Keep subsequent stores/operands after the projected escape,
-			// including a destination in the very same assignment statement.
-			last = g.point()
-			g.edge(p, last)
-			return
-		case *ast.AssignStmt:
-			var stores []ast.Node
-			for _, lhs := range n.Lhs {
-				address(lhs, &stores)
-			}
-			for _, rhs := range n.Rhs {
-				visit(rhs)
-			}
-			for _, store := range stores {
-				index(store)
-			}
-		case *ast.IncDecStmt:
-			var stores []ast.Node
-			address(n.X, &stores)
-			for _, store := range stores {
-				index(store)
-			}
-		default:
-			loopChildren(n, visit)
-		}
-		index(n)
+	switch n := n.(type) {
+	case *ast.FuncLit:
+		// Index the construction only. The body is a separate frame.
+	case *ast.BinaryExpr:
+		r.binary(n)
+	case *ast.GoStmt:
+		r.operands(n.Call)
+	case *ast.DeferStmt:
+		r.operands(n.Call)
+	case *ast.CallExpr:
+		r.call(n)
+		return
+	case *ast.AssignStmt:
+		r.assign(n)
+	case *ast.IncDecStmt:
+		r.indexStores(r.address(n.X, nil))
+	default:
+		loopChildren(n, r.visit)
 	}
-	visit(node)
-	return last
+	r.index(n)
+}
+
+// binary branches around the right operand of && and ||, unless the left
+// operand's truth is known. Other operators evaluate both operands in order.
+func (r *loopSyncRecorder) binary(n *ast.BinaryExpr) {
+	if n.Op != token.LAND && n.Op != token.LOR {
+		loopChildren(n, r.visit)
+		return
+	}
+	r.visit(n.X)
+	left, known := r.c.s.deferredTruth(n.X)
+	if known && (n.Op == token.LAND && !left || n.Op == token.LOR && left) {
+		return
+	}
+	before := r.last
+	if !known {
+		r.last = r.g.point()
+		r.g.edge(before, r.last)
+	}
+	r.visit(n.Y)
+	if !known {
+		join := r.g.point()
+		r.g.edge(r.last, join)
+		r.g.edge(before, join)
+		r.last = join
+	}
+}
+
+func (r *loopSyncRecorder) operands(call *ast.CallExpr) {
+	if call == nil {
+		return
+	}
+	r.visit(call.Fun)
+	if r.c.s.deferredUnevaluated(call) {
+		return
+	}
+	for _, arg := range call.Args {
+		r.visit(arg)
+	}
+}
+
+func (r *loopSyncRecorder) call(n *ast.CallExpr) {
+	r.operands(n)
+	p := r.g.point()
+	r.g.edge(r.last, p)
+	r.last = p
+	r.index(n)
+	if r.g.recording != nil {
+		r.g.recording.calls = append(r.g.recording.calls, loopContextCall{call: n, point: p})
+	}
+	// Keep subsequent stores/operands after the projected escape,
+	// including a destination in the very same assignment statement.
+	r.last = r.g.point()
+	r.g.edge(p, r.last)
+}
+
+func (r *loopSyncRecorder) assign(n *ast.AssignStmt) {
+	var stores []ast.Node
+	for _, lhs := range n.Lhs {
+		stores = r.address(lhs, stores)
+	}
+	for _, rhs := range n.Rhs {
+		r.visit(rhs)
+	}
+	r.indexStores(stores)
+}
+
+// Locate destinations before the RHS, but index their eventual stores
+// afterwards. Only pointer/header/index operands load values here; a
+// struct/array root's identifier write is part of the later store too.
+func (r *loopSyncRecorder) address(expr ast.Expr, stores []ast.Node) []ast.Node {
+	if expr == nil {
+		return stores
+	}
+	switch n := expr.(type) {
+	case *ast.ParenExpr:
+		stores = r.address(n.X, stores)
+	case *ast.Ident:
+	case *ast.StarExpr:
+		r.visit(n.X)
+	case *ast.SelectorExpr:
+		if r.c.s.pointerValue(n.X) {
+			r.visit(n.X)
+		} else {
+			stores = r.address(n.X, stores)
+		}
+	case *ast.IndexExpr:
+		if r.c.s.referenceIndex(n.X) {
+			r.visit(n.X)
+		} else {
+			stores = r.address(n.X, stores)
+		}
+		r.visit(n.Index)
+	default:
+		r.visit(expr)
+		return stores
+	}
+	return append(stores, expr)
+}
+
+func (r *loopSyncRecorder) indexStores(stores []ast.Node) {
+	for _, store := range stores {
+		r.index(store)
+	}
 }
 
 type loopSyncLaunch struct {
@@ -213,39 +235,49 @@ func (c *loopFlowConflicts) projectSyncEscapes() *loopSyncEscapes {
 	values := map[*ast.GoStmt]loopValue{}
 	owners := map[*ast.GoStmt]*ast.FuncLit{}
 	for _, launch := range c.s.launches {
-		if values[launch.stmt] == nil {
-			values[launch.stmt] = loopValue{}
-		}
-		loopMerge(values[launch.stmt], launch.values)
+		loopSyncMerge(values, launch.stmt, launch.values)
 		owners[launch.stmt] = launch.owner
 	}
+	for _, g := range c.frames {
+		for stmt := range g.gos {
+			e.childrenOf(owners[stmt])[stmt] = values[stmt]
+		}
+	}
+	calls, edges := c.syncLiteralCalls(e.callee)
+	e.summarizeSyncCallees(edges)
+	for _, original := range c.frames {
+		e.frames = append(e.frames, e.projectSyncFrame(original, values, calls[original]))
+	}
+	return e
+}
+
+// syncLiteralCalls indexes each frame's direct literal invocations, and the
+// owner-to-callee edges they add to the summary DAG.
+func (c *loopFlowConflicts) syncLiteralCalls(callee func(ast.Expr) *ast.FuncLit) (map[*loopConflictFrame][]loopSyncCall, map[*ast.FuncLit][]*ast.FuncLit) {
 	calls := map[*loopConflictFrame][]loopSyncCall{}
 	edges := map[*ast.FuncLit][]*ast.FuncLit{}
 	for _, g := range c.frames {
-		for stmt := range g.gos {
-			owner := owners[stmt]
-			if e.children[owner] == nil {
-				e.children[owner] = map[*ast.GoStmt]loopValue{}
-			}
-			e.children[owner][stmt] = values[stmt]
-		}
 		for node, points := range g.nodes {
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
 				continue
 			}
-			lit := e.callee(call.Fun)
+			lit := callee(call.Fun)
 			if lit == nil {
 				continue
 			}
-			calls[g] = append(calls[g], loopSyncCall{literal: lit, points: points, inLoop: len(c.s.index.locations[call].loops) != 0})
-			owner := c.s.index.locations[call].owner
-			edges[owner] = append(edges[owner], lit)
+			location := c.s.index.locations[call]
+			calls[g] = append(calls[g], loopSyncCall{literal: lit, points: points, inLoop: len(location.loops) != 0})
+			edges[location.owner] = append(edges[location.owner], lit)
 		}
 	}
-	// Known immutable callees form a DAG. Memoized summaries visit each edge
-	// once, without comparing launch pairs. Apply lifetime filtering at EVERY
-	// invocation boundary, including aliases defined outside the wrapper.
+	return calls, edges
+}
+
+// Known immutable callees form a DAG. Memoized summaries visit each edge
+// once, without comparing launch pairs. Apply lifetime filtering at EVERY
+// invocation boundary, including aliases defined outside the wrapper.
+func (e *loopSyncEscapes) summarizeSyncCallees(edges map[*ast.FuncLit][]*ast.FuncLit) {
 	done := map[*ast.FuncLit]bool{}
 	var summarize func(*ast.FuncLit) map[*ast.GoStmt]loopValue
 	summarize = func(owner *ast.FuncLit) map[*ast.GoStmt]loopValue {
@@ -253,63 +285,101 @@ func (c *loopFlowConflicts) projectSyncEscapes() *loopSyncEscapes {
 			return e.children[owner]
 		}
 		done[owner] = true
-		if e.children[owner] == nil {
-			e.children[owner] = map[*ast.GoStmt]loopValue{}
-		}
+		children := e.childrenOf(owner)
 		for _, callee := range edges[owner] {
 			for stmt, value := range summarize(callee) {
 				merged := loopSyncOutside(value, callee)
-				loopMerge(merged, e.children[owner][stmt])
-				e.children[owner][stmt] = merged
+				loopMerge(merged, children[stmt])
+				children[stmt] = merged
 			}
 		}
-		return e.children[owner]
+		return children
 	}
 	for owner := range edges {
 		summarize(owner)
 	}
-	for _, original := range c.frames {
-		frame := loopSyncEscapeFrame{graph: original}
-		for stmt, point := range original.gos {
-			frame.launches = append(frame.launches, loopSyncLaunch{stmt: stmt, point: point, values: values[stmt]})
-		}
-		for _, call := range calls[original] {
-			var children []loopSyncLaunch
-			for stmt, value := range e.children[call.literal] {
-				outside := loopSyncOutside(value, call.literal)
-				if len(outside) != 0 {
-					if call.inLoop {
-						e.looped[stmt] = true
-					}
-					children = append(children, loopSyncLaunch{stmt: stmt, values: outside})
-				}
-			}
-			if len(children) == 0 {
-				continue
-			}
-			if frame.graph == original {
-				frame.graph = loopSyncCloneGraph(original)
-			}
-			for _, point := range call.points {
-				g := frame.graph
-				next := append([]int(nil), g.points[point].next...)
-				// Fan out, do not put escaping siblings in an artificial
-				// sequence: mutually exclusive child launches must not race
-				// merely because they share a callsite. Their own CFG proves
-				// body-internal conflicts; caller backedges still connect them.
-				for _, child := range children {
-					child.point = g.point()
-					g.edge(point, child.point)
-					for _, successor := range next {
-						g.edge(child.point, successor)
-					}
-					frame.launches = append(frame.launches, child)
-				}
-			}
-		}
-		e.frames = append(e.frames, frame)
+}
+
+// projectSyncFrame keeps a frame's ordinary launches and splices in the
+// escaping launches of each direct literal call.
+func (e *loopSyncEscapes) projectSyncFrame(original *loopConflictFrame, values map[*ast.GoStmt]loopValue, calls []loopSyncCall) loopSyncEscapeFrame {
+	frame := loopSyncEscapeFrame{graph: original}
+	for stmt, point := range original.gos {
+		frame.launches = append(frame.launches, loopSyncLaunch{stmt: stmt, point: point, values: values[stmt]})
 	}
-	return e
+	for _, call := range calls {
+		children := loopSyncEscaping(e.children[call.literal], call.literal)
+		if call.inLoop {
+			for _, child := range children {
+				e.looped[child.stmt] = true
+			}
+		}
+		frame.splice(original, children, call.points...)
+	}
+	return frame
+}
+
+// childrenOf returns owner's launch summary, creating it on first use.
+func (e *loopSyncEscapes) childrenOf(owner *ast.FuncLit) map[*ast.GoStmt]loopValue {
+	children := e.children[owner]
+	if children == nil {
+		children = map[*ast.GoStmt]loopValue{}
+		e.children[owner] = children
+	}
+	return children
+}
+
+// markLooped attributes every summarized launch to a looping execution.
+func (e *loopSyncEscapes) markLooped(summary map[*ast.GoStmt]loopValue) {
+	for stmt := range summary {
+		e.looped[stmt] = true
+	}
+}
+
+// splice inserts children after each call point, each rejoining that point's
+// original successors. The source graph is cloned before its first change.
+func (f *loopSyncEscapeFrame) splice(original *loopConflictFrame, children []loopSyncLaunch, points ...int) {
+	if len(children) == 0 {
+		return
+	}
+	if f.graph == original {
+		f.graph = loopSyncCloneGraph(original)
+	}
+	g := f.graph
+	for _, point := range points {
+		next := append([]int(nil), g.points[point].next...)
+		// Fan out, do not put escaping siblings in an artificial
+		// sequence: mutually exclusive child launches must not race
+		// merely because they share a callsite. Their own CFG proves
+		// body-internal conflicts; caller backedges still connect them.
+		for _, child := range children {
+			child.point = g.point()
+			g.edge(point, child.point)
+			for _, successor := range next {
+				g.edge(child.point, successor)
+			}
+			f.launches = append(f.launches, child)
+		}
+	}
+}
+
+// loopSyncEscaping keeps the summarized launches whose payload still refers to
+// storage outside callee. Splicing assigns their points.
+func loopSyncEscaping(summary map[*ast.GoStmt]loopValue, callee *ast.FuncLit) []loopSyncLaunch {
+	var children []loopSyncLaunch
+	for stmt, value := range summary {
+		if outside := loopSyncOutside(value, callee); len(outside) != 0 {
+			children = append(children, loopSyncLaunch{stmt: stmt, values: outside})
+		}
+	}
+	return children
+}
+
+func loopSyncMerge(values map[*ast.GoStmt]loopValue, stmt *ast.GoStmt, value loopValue) {
+	if values[stmt] == nil {
+		values[stmt] = loopValue{}
+	}
+	loopMerge(values[stmt], value)
 }
 
 // contextKey is order-independent and visits only live capture contents. Hash
@@ -432,153 +502,168 @@ func (c *loopFlowConflicts) publishContextLaunches() {
 }
 
 func (c *loopFlowConflicts) projectContextEscapes() *loopSyncEscapes {
-	e := &loopSyncEscapes{children: map[*ast.FuncLit]map[*ast.GoStmt]loopValue{}, callee: c.callee, looped: map[*ast.GoStmt]bool{}}
-	active := c.activeContextFrames()
-	summaries := map[*loopConflictFrame]map[*ast.GoStmt]loopValue{}
-	var summarize func(*loopConflictFrame) map[*ast.GoStmt]loopValue
-	summarize = func(frame *loopConflictFrame) map[*ast.GoStmt]loopValue {
-		if prior := summaries[frame]; prior != nil {
-			return prior
-		}
-		out := map[*ast.GoStmt]loopValue{}
-		summaries[frame] = out
-		merge := func(stmt *ast.GoStmt, value loopValue) {
-			if out[stmt] == nil {
-				out[stmt] = loopValue{}
-			}
-			loopMerge(out[stmt], value)
-		}
-		for _, launch := range frame.launches {
-			merge(launch.stmt, launch.values)
-		}
-		for _, call := range frame.calls {
-			for stmt, value := range summarize(call.target) {
-				merge(stmt, loopSyncOutside(value, call.target.owner))
-			}
-		}
-		return out
+	p := &loopContextProjection{
+		c:         c,
+		e:         &loopSyncEscapes{children: map[*ast.FuncLit]map[*ast.GoStmt]loopValue{}, callee: c.callee, looped: map[*ast.GoStmt]bool{}},
+		summaries: map[*loopConflictFrame]map[*ast.GoStmt]loopValue{},
 	}
-	for _, original := range active {
-		// Async inheritance remains source-indexed, but its values come only
-		// from active execution contexts, never an obsolete constructor frame.
-		if e.children[original.owner] == nil {
-			e.children[original.owner] = map[*ast.GoStmt]loopValue{}
-		}
-		for stmt, value := range summarize(original) {
-			if e.children[original.owner][stmt] == nil {
-				e.children[original.owner][stmt] = loopValue{}
-			}
-			loopMerge(e.children[original.owner][stmt], value)
-		}
-		frame := loopSyncEscapeFrame{graph: original, launches: append([]loopSyncLaunch(nil), original.launches...)}
-		for _, call := range original.calls {
-			if call.guard != nil {
-				continue
-			}
-			var children []loopSyncLaunch
-			for stmt, value := range summarize(call.target) {
-				// Loop attribution describes execution, not escaping storage.
-				// Even a callee-local capture can have a body-internal proof.
-				if len(c.s.index.locations[call.call].loops) != 0 {
-					e.looped[stmt] = true
-				}
-				outside := loopSyncOutside(value, call.target.owner)
-				if len(outside) != 0 {
-					children = append(children, loopSyncLaunch{stmt: stmt, values: outside})
-				}
-			}
-			if len(children) == 0 {
-				continue
-			}
-			if frame.graph == original {
-				frame.graph = loopSyncCloneGraph(original)
-			}
-			g := frame.graph
-			next := append([]int(nil), g.points[call.point].next...)
-			for _, child := range children {
-				child.point = g.point()
-				g.edge(call.point, child.point)
-				for _, successor := range next {
-					g.edge(child.point, successor)
-				}
-				frame.launches = append(frame.launches, child)
-			}
-		}
-		install := func(dst *loopSyncEscapeFrame, stmt *ast.DeferStmt, point func(int, func(int))) {
-			for _, event := range original.delayed[stmt] {
-				point(event.point, func(p int) {
-					dst.graph.effects[p] = append(dst.graph.effects[p], event.effects...)
-					if event.target != nil {
-						for child, value := range summarize(event.target) {
-							if len(c.s.index.locations[stmt].loops) != 0 {
-								e.looped[child] = true
-							}
-							outside := loopSyncOutside(value, event.target.owner)
-							if len(outside) != 0 {
-								dst.launches = append(dst.launches, loopSyncLaunch{stmt: child, point: p, values: outside})
-							}
-						}
-					}
-				})
-			}
-		}
-		var statements []*ast.DeferStmt
-		for stmt := range original.delayed {
-			statements = append(statements, stmt)
-		}
-		// A guard is redundant only if registration is active on EVERY
-		// reachable path to every physical event, since the last owner reset.
-		// Straight-line defer stacks therefore use one shared graph, not D²
-		// copies of the whole function. Effects/payloads stay occurrence-local.
-		var workspace loopDeferredGuardWorkspace
-		var conditional []*ast.DeferStmt
-		effectsOwned := false
-		for _, stmt := range statements {
-			owner := c.s.index.locations[stmt].owner
-			if !workspace.alwaysActive(frame.graph, original.registrations[stmt], original.resets[owner], original.delayed[stmt]) {
-				conditional = append(conditional, stmt)
-				continue
-			}
-			if !effectsOwned {
-				frame.graph = loopDeferredProjectionGraph(frame.graph)
-				effectsOwned = true
-			}
-			install(&frame, stmt, func(p int, emit func(int)) { emit(p) })
-		}
-		e.frames = append(e.frames, frame)
-		if len(conditional) != 0 {
-			e.guarded = append(e.guarded, func(visit func(loopSyncEscapeFrame)) {
-				var scratch loopDeferredGuardWorkspace
-				for i, stmt := range conditional {
-					first := loopDeferredGuard{registrations: original.registrations[stmt], resets: original.resets[c.s.index.locations[stmt].owner]}
-					guarded := scratch.project(frame, first, nil)
-					install(&guarded, stmt, scratch.activePoints(1))
-					visit(guarded)
-					scratch.launches = guarded.launches
-					// Two independent guards preserve correlation at joins. The
-					// product and metadata storage are reused for every pair.
-					for _, other := range conditional[i+1:] {
-						launches := false
-						for _, s := range []*ast.DeferStmt{stmt, other} {
-							for _, event := range original.delayed[s] {
-								launches = launches || event.target != nil && len(summarize(event.target)) != 0
-							}
-						}
-						if !launches {
-							continue
-						}
-						second := &loopDeferredGuard{registrations: original.registrations[other], resets: original.resets[c.s.index.locations[other].owner]}
-						pair := scratch.project(frame, first, second)
-						install(&pair, stmt, scratch.activePoints(1))
-						install(&pair, other, scratch.activePoints(2))
-						visit(pair)
-						scratch.launches = pair.launches
-					}
-				}
-			})
+	for _, original := range c.activeContextFrames() {
+		p.project(original)
+	}
+	return p.e
+}
+
+// loopContextProjection is the state one projectContextEscapes pass shares
+// across active frames: the escapes being built and memoized frame summaries.
+type loopContextProjection struct {
+	c         *loopFlowConflicts
+	e         *loopSyncEscapes
+	summaries map[*loopConflictFrame]map[*ast.GoStmt]loopValue
+}
+
+// summarize unions a frame's own launches with those of its synchronous
+// calls, dropping callee-local storage at each call boundary.
+func (p *loopContextProjection) summarize(frame *loopConflictFrame) map[*ast.GoStmt]loopValue {
+	if prior := p.summaries[frame]; prior != nil {
+		return prior
+	}
+	out := map[*ast.GoStmt]loopValue{}
+	p.summaries[frame] = out
+	for _, launch := range frame.launches {
+		loopSyncMerge(out, launch.stmt, launch.values)
+	}
+	for _, call := range frame.calls {
+		for stmt, value := range p.summarize(call.target) {
+			loopSyncMerge(out, stmt, loopSyncOutside(value, call.target.owner))
 		}
 	}
-	return e
+	return out
+}
+
+func (p *loopContextProjection) project(original *loopConflictFrame) {
+	// Async inheritance remains source-indexed, but its values come only
+	// from active execution contexts, never an obsolete constructor frame.
+	children := p.e.childrenOf(original.owner)
+	for stmt, value := range p.summarize(original) {
+		loopSyncMerge(children, stmt, value)
+	}
+	frame := p.callFrame(original)
+	conditional := p.installUnconditional(&frame, original)
+	p.e.frames = append(p.e.frames, frame)
+	if len(conditional) != 0 {
+		p.e.guarded = append(p.e.guarded, p.guardedProducts(original, frame, conditional))
+	}
+}
+
+// callFrame copies a frame's launches and splices in the escaping launches of
+// each unguarded synchronous call.
+func (p *loopContextProjection) callFrame(original *loopConflictFrame) loopSyncEscapeFrame {
+	frame := loopSyncEscapeFrame{graph: original, launches: append([]loopSyncLaunch(nil), original.launches...)}
+	for _, call := range original.calls {
+		if call.guard != nil {
+			continue
+		}
+		summary := p.summarize(call.target)
+		// Loop attribution describes execution, not escaping storage.
+		// Even a callee-local capture can have a body-internal proof.
+		if len(p.c.s.index.locations[call.call].loops) != 0 {
+			p.e.markLooped(summary)
+		}
+		frame.splice(original, loopSyncEscaping(summary, call.target.owner), call.point)
+	}
+	return frame
+}
+
+// installUnconditional installs every defer whose guard is redundant into
+// frame and returns the conditional rest, which need guarded products.
+func (p *loopContextProjection) installUnconditional(frame *loopSyncEscapeFrame, original *loopConflictFrame) []*ast.DeferStmt {
+	// A guard is redundant only if registration is active on EVERY
+	// reachable path to every physical event, since the last owner reset.
+	// Straight-line defer stacks therefore use one shared graph, not D²
+	// copies of the whole function. Effects/payloads stay occurrence-local.
+	var workspace loopDeferredGuardWorkspace
+	var conditional []*ast.DeferStmt
+	effectsOwned := false
+	for stmt := range original.delayed {
+		guard := p.guard(original, stmt)
+		if !workspace.alwaysActive(frame.graph, guard.registrations, guard.resets, original.delayed[stmt]) {
+			conditional = append(conditional, stmt)
+			continue
+		}
+		if !effectsOwned {
+			frame.graph = loopDeferredProjectionGraph(frame.graph)
+			effectsOwned = true
+		}
+		p.install(frame, original, stmt, func(at int, emit func(int)) { emit(at) })
+	}
+	return conditional
+}
+
+// guardedProducts projects each conditional defer under its own guard, and
+// each launching pair of them under both guards.
+func (p *loopContextProjection) guardedProducts(original *loopConflictFrame, frame loopSyncEscapeFrame, conditional []*ast.DeferStmt) func(func(loopSyncEscapeFrame)) {
+	return func(visit func(loopSyncEscapeFrame)) {
+		var scratch loopDeferredGuardWorkspace
+		for i, stmt := range conditional {
+			first := p.guard(original, stmt)
+			guarded := scratch.project(frame, first, nil)
+			p.install(&guarded, original, stmt, scratch.activePoints(1))
+			visit(guarded)
+			scratch.launches = guarded.launches
+			// Two independent guards preserve correlation at joins. The
+			// product and metadata storage are reused for every pair.
+			for _, other := range conditional[i+1:] {
+				if !p.launchesAny(original, stmt, other) {
+					continue
+				}
+				second := p.guard(original, other)
+				pair := scratch.project(frame, first, &second)
+				p.install(&pair, original, stmt, scratch.activePoints(1))
+				p.install(&pair, original, other, scratch.activePoints(2))
+				visit(pair)
+				scratch.launches = pair.launches
+			}
+		}
+	}
+}
+
+// guard pairs stmt's registrations with the resets of its owning literal.
+func (p *loopContextProjection) guard(original *loopConflictFrame, stmt *ast.DeferStmt) loopDeferredGuard {
+	return loopDeferredGuard{registrations: original.registrations[stmt], resets: original.resets[p.c.s.index.locations[stmt].owner]}
+}
+
+// launchesAny reports whether a physical event of stmts invokes a target with
+// any summarized launch.
+func (p *loopContextProjection) launchesAny(original *loopConflictFrame, stmts ...*ast.DeferStmt) bool {
+	for _, stmt := range stmts {
+		for _, event := range original.delayed[stmt] {
+			if event.target != nil && len(p.summarize(event.target)) != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// install replays stmt's physical events into dst at the points chosen by
+// point: their effects, then the escaping launches of an invoked target.
+func (p *loopContextProjection) install(dst *loopSyncEscapeFrame, original *loopConflictFrame, stmt *ast.DeferStmt, point func(int, func(int))) {
+	for _, event := range original.delayed[stmt] {
+		point(event.point, func(at int) {
+			dst.graph.effects[at] = append(dst.graph.effects[at], event.effects...)
+			if event.target == nil {
+				return
+			}
+			summary := p.summarize(event.target)
+			if len(p.c.s.index.locations[stmt].loops) != 0 {
+				p.e.markLooped(summary)
+			}
+			for _, child := range loopSyncEscaping(summary, event.target.owner) {
+				child.point = at
+				dst.launches = append(dst.launches, child)
+			}
+		})
+	}
 }
 
 // Callee locals/parameters are new allocations on EVERY invocation, even
