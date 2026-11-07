@@ -80,14 +80,25 @@ Commands:
 
 Examples:
   diago -target ./...                 audit the module
+  GOFLAGS=-short diago -target ./...  audit with go test -short
   diago --perf -target ./... -bench . profile all benchmarks
   diago compare before.json after.json
   diago skills -agent agents          write AGENTS.md docs
 
 Run 'diago <command> -h' for command-specific flags
 (e.g. 'diago audit -h' or 'diago --perf -h').
-`)
+` + auditGoFlagsHelp)
 }
+
+const auditGoFlagsHelp = `
+Test flags:
+  The audit passes its environment to every go command it starts, and go
+  reads GOFLAGS. Put test and build flags there in the -flag=value form.
+  Each go command ignores the flags it does not know.
+    GOFLAGS=-short diago -target ./...           skip tests that check testing.Short
+    GOFLAGS='-short -p=2' diago -target ./...    also run at most 2 test binaries at a time
+  Progress goes to stderr. The report goes to -output.
+`
 
 func versionInfo() string {
 	if version != "dev" {
@@ -350,6 +361,7 @@ func runAudit(args []string) {
 	target := fs.String("target", "./...", "package path to audit")
 	output := fs.String("output", ".diago/audit.txt", "output file for audit")
 	format := fs.String("format", "text", "output format: text or json")
+	tests := fs.Bool("test", true, "run go test on the target (the test check). Use -test=false to skip it")
 	race := fs.Bool("race", false, "run go test -race")
 	coverage := fs.Bool("coverage", false, "run go test -coverprofile and summarize coverage")
 	deps := fs.Bool("deps", false, "run go list -deps")
@@ -363,7 +375,16 @@ func runAudit(args []string) {
 	includeGenerated := fs.Bool("include-generated", false, "include findings from generated files (skipped by default)")
 	baseline := fs.String("baseline", "", "path to a JSON audit report; report and gate on new findings only")
 	summaryLimit := fs.Int("summary-limit", 25, "maximum critical/high AST findings in the summary. Use -1 for all")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage of audit:\n")
+		fs.PrintDefaults()
+		fmt.Fprint(fs.Output(), auditGoFlagsHelp)
+	}
 	fs.Parse(args)
+	if err := applyPositionalTarget(fs, target); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(2)
+	}
 
 	report, err := diago.RunAudit(diago.AuditConfig{
 		TargetPath:       *target,
@@ -383,6 +404,8 @@ func runAudit(args []string) {
 		IncludeGenerated: *includeGenerated,
 		Baseline:         *baseline,
 		SummaryLimit:     *summaryLimit,
+		SkipTests:        !*tests,
+		Progress:         os.Stderr,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -478,4 +501,31 @@ func parseFormat(s string) diago.OutputFormat {
 		return diago.FormatJSON
 	}
 	return diago.FormatText
+}
+
+// applyPositionalTarget lets the target come first, as in "diago ./... -race".
+// The flag package stops at the first argument that is not a flag, so the
+// flags after the target are parsed here.
+func applyPositionalTarget(fs *flag.FlagSet, target *string) error {
+	if fs.NArg() == 0 {
+		return nil
+	}
+	targetSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "target" {
+			targetSet = true
+		}
+	})
+	positional := fs.Arg(0)
+	if targetSet && *target != positional {
+		return fmt.Errorf("two targets: -target %s and %s", *target, positional)
+	}
+	if err := fs.Parse(fs.Args()[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	*target = positional
+	return nil
 }

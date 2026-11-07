@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,10 @@ type AuditConfig struct {
 	// Baseline is a JSON audit report; when set, findings already in it are
 	// dropped so the audit gates on new findings only.
 	Baseline string `json:"baseline,omitempty"`
+	// SkipTests removes the test check. Race, coverage and the dead code fix rerun still run when set.
+	SkipTests bool `json:"skip_tests,omitempty"`
+	// Progress receives one line when each step starts and ends. Nil discards it.
+	Progress io.Writer `json:"-"`
 }
 
 // AuditReport contains diagnostics from Go toolchain-only checks.
@@ -79,6 +84,7 @@ type AuditCheck struct {
 	ToolVersion string `json:"tool_version,omitempty"`
 	Passed      bool   `json:"passed"`
 	Output      string `json:"output"`
+	DurationMS  int64  `json:"duration_ms,omitempty"`
 }
 
 // CoverageReport summarizes go test coverage output.
@@ -106,6 +112,9 @@ func (c *AuditConfig) defaults() {
 	if c.SummaryLimit == 0 {
 		c.SummaryLimit = 25
 	}
+	if c.Progress == nil {
+		c.Progress = io.Discard
+	}
 }
 
 // RunAudit executes Go toolchain-only diagnostics and writes a report.
@@ -126,8 +135,14 @@ func RunAudit(cfg AuditConfig) (*AuditReport, error) {
 		GoToolVersion: goToolVersion(workDir), OverallPass: true, Rules: supportedRuleDescriptors(targetGoVersion),
 	}
 
-	report.addCheck(runAuditCommand(workDir, "test", "go", "test", targetPath))
-	report.addCheck(runAuditCommand(workDir, "vet", "go", "vet", targetPath))
+	suite := runTestSuite(cfg, workDir, targetPath)
+	if !cfg.SkipTests {
+		report.addCheck(suite.test)
+	}
+	report.addCheck(timedCheck(cfg.Progress, "vet", func() AuditCheck {
+		return runAuditCommand(workDir, "vet", "go", "vet", targetPath)
+	}))
+	addTestSuiteChecks(report, cfg, suite)
 	runOptionalAuditChecks(report, cfg, workDir, targetPath, targetGoVersion)
 	report.Rules = mergeRuleDescriptors(report.Rules, report.ASTFindings, targetGoVersion)
 
@@ -230,10 +245,6 @@ func sortFindings(findings []ASTFinding) {
 }
 
 func runOptionalAuditChecks(report *AuditReport, cfg AuditConfig, workDir, targetPath, targetGoVersion string) {
-	if cfg.Race {
-		report.addCheck(runAuditCommand(workDir, "race", "go", "test", "-race", targetPath))
-	}
-	runCoverageAuditCheck(report, cfg, workDir, targetPath)
 	runDepsAuditCheck(report, cfg, workDir, targetPath)
 	runASTAuditCheck(report, cfg, workDir, targetPath)
 	runModernizeAuditCheck(report, cfg, workDir, targetPath, targetGoVersion)
@@ -243,20 +254,26 @@ func runOptionalAuditChecks(report *AuditReport, cfg AuditConfig, workDir, targe
 	runDeadCodeFixCheck(report, cfg, workDir, targetPath)
 }
 
-func runCoverageAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
-	if !cfg.Coverage {
-		return
+func addTestSuiteChecks(report *AuditReport, cfg AuditConfig, suite testSuiteResult) {
+	if cfg.Race {
+		report.addCheck(suite.race)
 	}
-	coverage, check := runCoverage(workDir, targetPath)
-	report.addCheck(check)
-	report.Coverage = coverage
+	if cfg.Coverage {
+		report.addCheck(suite.coverage.Check)
+		report.Coverage = suite.coverage.Report
+	}
 }
 
 func runDepsAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath string) {
 	if !cfg.Deps {
 		return
 	}
-	deps, check := runDeps(workDir, targetPath)
+	var deps []string
+	check := timedCheck(cfg.Progress, "deps", func() AuditCheck {
+		var check AuditCheck
+		deps, check = runDeps(workDir, targetPath)
+		return check
+	})
 	report.addCheck(check)
 	report.Dependencies = deps
 }
@@ -265,7 +282,9 @@ func runASTAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPath 
 	if !cfg.AST {
 		return
 	}
-	findings, check := runASTAudit(workDir, targetPath, cfg.IncludeGenerated)
+	findings, check := timedFindings(cfg.Progress, "ast", func() ([]ASTFinding, AuditCheck) {
+		return runASTAudit(workDir, targetPath, cfg.IncludeGenerated)
+	})
 	report.addCheck(check)
 	report.ASTFindings = findings
 }
@@ -274,7 +293,9 @@ func runModernizeAuditCheck(report *AuditReport, cfg AuditConfig, workDir, targe
 	if !cfg.Modernize && !cfg.ModernizeFix {
 		return
 	}
-	findings, check := runModernizeAudit(workDir, targetPath, cfg.ModernizeFix)
+	findings, check := timedFindings(cfg.Progress, "modernize", func() ([]ASTFinding, AuditCheck) {
+		return runModernizeAudit(workDir, targetPath, cfg.ModernizeFix)
+	})
 	report.addCheck(check)
 	findings = filterUnsupportedFindings(findings, targetGoVersion)
 	findings = filterSkippedFindings(findings, workDir, cfg.IncludeGenerated)
@@ -305,7 +326,9 @@ func runU1000AuditCheck(report *AuditReport, cfg AuditConfig, workDir, targetPat
 	if !cfg.U1000 {
 		return
 	}
-	findings, check := runU1000Audit(workDir, targetPath)
+	findings, check := timedFindings(cfg.Progress, "u1000", func() ([]ASTFinding, AuditCheck) {
+		return runU1000Audit(workDir, targetPath)
+	})
 	report.addCheck(check)
 	findings = filterSkippedFindings(findings, workDir, cfg.IncludeGenerated)
 	report.ASTFindings = append(report.ASTFindings, findings...)
@@ -315,7 +338,9 @@ func runStaticcheckAuditCheck(report *AuditReport, cfg AuditConfig, workDir, tar
 	if !cfg.Staticcheck {
 		return
 	}
-	findings, check := runCuratedStaticcheckAudit(workDir, targetPath)
+	findings, check := timedFindings(cfg.Progress, "staticcheck", func() ([]ASTFinding, AuditCheck) {
+		return runCuratedStaticcheckAudit(workDir, targetPath)
+	})
 	report.addCheck(check)
 	findings = filterSkippedFindings(findings, workDir, cfg.IncludeGenerated)
 	report.ASTFindings = append(report.ASTFindings, findings...)
@@ -325,7 +350,9 @@ func runInferTypeArgsAuditCheck(report *AuditReport, cfg AuditConfig, workDir, t
 	if !cfg.InferTypeArgs {
 		return
 	}
-	findings, check := runInferTypeArgsAudit(workDir, targetPath)
+	findings, check := timedFindings(cfg.Progress, "infertypeargs", func() ([]ASTFinding, AuditCheck) {
+		return runInferTypeArgsAudit(workDir, targetPath)
+	})
 	report.addCheck(check)
 	findings = filterSkippedFindings(findings, workDir, cfg.IncludeGenerated)
 	report.ASTFindings = append(report.ASTFindings, findings...)
@@ -335,11 +362,24 @@ func runDeadCodeFixCheck(report *AuditReport, cfg AuditConfig, workDir, targetPa
 	if !cfg.DeadCodeFix {
 		return
 	}
-	check := removeDeadCodeFindings(report.ASTFindings)
+	removed := 0
+	check := timedCheck(cfg.Progress, "deadcode-fix", func() AuditCheck {
+		var check AuditCheck
+		check, removed = removeDeadCodeFindings(report.ASTFindings)
+		return check
+	})
 	report.addCheck(check)
-	if check.Passed {
-		report.addCheck(runAuditCommand(workDir, "test-after-deadcode-fix", "go", "test", targetPath))
+	if !check.Passed {
+		return
 	}
+	if !shouldRerunTestsAfterDeadCodeFix(cfg, removed) {
+		fmt.Fprintf(cfg.Progress, "diago: test-after-deadcode-fix skipped (the dead code fix changed no files)\n")
+		report.addCheck(skippedTestAfterDeadCodeFix(report, targetPath))
+		return
+	}
+	report.addCheck(timedCheck(cfg.Progress, "test-after-deadcode-fix", func() AuditCheck {
+		return runAuditCommand(workDir, "test-after-deadcode-fix", "go", "test", targetPath)
+	}))
 }
 
 func (r *AuditReport) addCheck(check AuditCheck) {
@@ -364,70 +404,105 @@ func runAuditCommand(workDir, name string, args ...string) AuditCheck {
 	}
 }
 
-func runCoverage(workDir, target string) (*CoverageReport, AuditCheck) {
+// coverageResult is the coverage check plus what the test check needs from the same run.
+type coverageResult struct {
+	Report *CoverageReport
+	Check  AuditCheck
+	// Listed is true when go list found the packages of the target.
+	Listed bool
+	// Tests is the go test step alone. It is nil when no package has tests.
+	Tests *AuditCheck
+	// Untested holds the packages of the target that have no test files.
+	Untested []string
+}
+
+// testsPassed reports whether every package with tests passed, so the run can supply the test check.
+func (r coverageResult) testsPassed() bool {
+	if !r.Listed {
+		return false
+	}
+	if r.Tests == nil {
+		return len(r.Untested) > 0
+	}
+	return r.Tests.Passed
+}
+
+func runCoverage(workDir, target string) coverageResult {
 	tmpDir, err := os.MkdirTemp("", "diago-audit-*")
 	if err != nil {
-		return nil, AuditCheck{Name: "coverage", Command: "mkdir temp", Passed: false, Output: err.Error()}
+		return coverageResult{Check: AuditCheck{Name: "coverage", Command: "mkdir temp", Passed: false, Output: err.Error()}}
 	}
 	defer os.RemoveAll(tmpDir)
 
 	profile := filepath.Join(tmpDir, "coverage.out")
-	targets, listCheck := coverageTargets(workDir, target)
+	targets, untested, listCheck := coverageTargets(workDir, target)
 	if !listCheck.Passed {
-		return nil, listCheck
+		return coverageResult{Check: listCheck}
 	}
+	result := coverageResult{Listed: true, Untested: untested}
 	if len(targets) == 0 {
-		return &CoverageReport{}, AuditCheck{
+		result.Report = &CoverageReport{}
+		result.Check = AuditCheck{
 			Name:    "coverage",
 			Command: "go test -coverprofile coverage.out " + target,
 			Passed:  true,
 			Output:  "no packages with tests; coverage skipped\n",
 		}
+		return result
 	}
 	args := []string{"go", "test", "-coverprofile", profile}
 	args = append(args, targets...)
 	check := runAuditCommand(workDir, "coverage", args...)
+	tests := check
+	result.Tests = &tests
 	if !check.Passed {
-		return nil, check
+		result.Check = check
+		return result
 	}
+	result.Report, result.Check = summarizeCoverage(workDir, profile, check)
+	return result
+}
 
+func summarizeCoverage(workDir, profile string, check AuditCheck) (*CoverageReport, AuditCheck) {
 	cmd := exec.Command("go", "tool", "cover", "-func", profile)
 	cmd.Dir = workDir
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	err = cmd.Run()
+	err := cmd.Run()
 	check.Command += " && go tool cover -func coverage.out"
 	check.Output += out.String()
 	check.Passed = err == nil
 	if err != nil {
 		return nil, check
 	}
-
 	return parseCoverageFunc(out.String()), check
 }
 
-func coverageTargets(workDir, target string) ([]string, AuditCheck) {
+// coverageTargets splits the packages of target into packages with tests and packages without.
+func coverageTargets(workDir, target string) ([]string, []string, AuditCheck) {
 	cmd := exec.Command("go", "list", "-json", target)
 	cmd.Dir = workDir
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
-		return nil, AuditCheck{Name: "coverage", Command: "go list -json " + target, Passed: false, Output: out.String()}
+		return nil, nil, AuditCheck{Name: "coverage", Command: "go list -json " + target, Passed: false, Output: out.String()}
 	}
 	dec := json.NewDecoder(bytes.NewReader(out.Bytes()))
-	var targets []string
+	var targets, untested []string
 	for dec.More() {
 		var pkg goListPackage
 		if err := dec.Decode(&pkg); err != nil {
-			return nil, AuditCheck{Name: "coverage", Command: "go list -json " + target, Passed: false, Output: err.Error()}
+			return nil, nil, AuditCheck{Name: "coverage", Command: "go list -json " + target, Passed: false, Output: err.Error()}
 		}
 		if len(pkg.TestGoFiles)+len(pkg.XTestGoFiles) > 0 {
 			targets = append(targets, pkg.ImportPath)
+		} else {
+			untested = append(untested, pkg.ImportPath)
 		}
 	}
-	return targets, AuditCheck{Passed: true}
+	return targets, untested, AuditCheck{Passed: true}
 }
 
 func parseCoverageFunc(text string) *CoverageReport {
