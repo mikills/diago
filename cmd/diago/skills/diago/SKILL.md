@@ -87,7 +87,11 @@ Runs native AST checks for cyclomatic complexity, function length, error handlin
 diago -target ./...                                   # audit the whole module
 diago -target ./... -format json -output audit.json   # machine-readable output
 diago -target ./... -race                             # also run go test -race
+diago -target ./... -test=false                       # skip the test check, for example for AST findings only
+GOFLAGS='-short -p=2' diago -target ./...             # pass test flags to every go test step
 ```
+
+Each step prints its start and its duration to stderr. A passed `-race` or `-coverage` run also gives the test check result, so the suite usually runs once.
 
 Opt into extra checks:
 
@@ -124,6 +128,7 @@ The command exits non-zero when the audit fails, so it can gate CI. A summary pr
 -target          package path (default ./...)
 -output          report path (default .diago/audit.txt)
 -format          text or json (default text)
+-test            run go test on the target (default true)
 -race            run go test -race
 -coverage        collect coverage (default false)
 -deps            list dependencies (default false)

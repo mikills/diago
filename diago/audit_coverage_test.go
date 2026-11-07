@@ -9,14 +9,18 @@ import (
 
 func TestCovSkipNoTests(t *testing.T) {
 	dir := coverageModule(t, false)
-	targets, check := coverageTargets(dir, "./...")
+	targets, untested, check := coverageTargets(dir, "./...")
 	if !check.Passed {
 		t.Fatalf("coverageTargets failed: %s", check.Output)
 	}
 	if len(targets) != 1 || targets[0] != "example.com/coverage/tested" {
 		t.Fatalf("coverage targets = %v, want only tested package", targets)
 	}
-	report, coverageCheck := runCoverage(dir, "./...")
+	if len(untested) != 1 || untested[0] != "example.com/coverage/notests" {
+		t.Fatalf("untested packages = %v, want only notests package", untested)
+	}
+	result := runCoverage(dir, "./...")
+	report, coverageCheck := result.Report, result.Check
 	if !coverageCheck.Passed {
 		t.Fatalf("coverage failed: %s", coverageCheck.Output)
 	}
@@ -29,7 +33,8 @@ func TestRunCoverageWithNoTestsPasses(t *testing.T) {
 	dir := t.TempDir()
 	writeCoverageFile(t, dir, "go.mod", "module example.com/notests\n\ngo 1.22\n")
 	writeCoverageFile(t, dir, "plain.go", "package notests\n\nfunc Value() int { return 1 }\n")
-	report, check := runCoverage(dir, "./...")
+	result := runCoverage(dir, "./...")
+	report, check := result.Report, result.Check
 	if !check.Passed || report == nil || !strings.Contains(check.Output, "coverage skipped") {
 		t.Fatalf("no-test coverage should pass: report=%+v check=%+v", report, check)
 	}
@@ -37,7 +42,7 @@ func TestRunCoverageWithNoTestsPasses(t *testing.T) {
 
 func TestCovKeepsFailures(t *testing.T) {
 	dir := coverageModule(t, true)
-	_, check := runCoverage(dir, "./...")
+	check := runCoverage(dir, "./...").Check
 	if check.Passed {
 		t.Fatalf("failing test must fail coverage check: %+v", check)
 	}
@@ -53,7 +58,7 @@ func TestCovKeepsEnv(t *testing.T) {
 	writeCoverageFile(t, dir, "tested/env_test.go", "package tested\n\nimport (\"os\"; \"testing\")\n\nfunc TestEnvironment(t *testing.T) { if os.Getenv(\"DIAGO_COVERAGE_TEST\") != \"present\" { t.Fatal(\"environment missing\") } }\n")
 	t.Setenv("DIAGO_COVERAGE_TEST", "present")
 
-	_, check := runCoverage(dir, "./tested")
+	check := runCoverage(dir, "./tested").Check
 	if !check.Passed {
 		t.Fatalf("selected package coverage failed: %+v", check)
 	}

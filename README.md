@@ -78,6 +78,23 @@ diago -target ./... -staticcheck
 diago -target ./... -infertypeargs   # report redundant explicit type arguments (gopls, report-only)
 ```
 
+Test runs:
+
+The audit runs the test suite of the target once in most cases. With `-race`, the race run also gives the test check result when it passes. With `-coverage`, the coverage run does the same. When that run fails, the audit runs plain `go test` to find which check failed. `-race` and `-coverage` stay separate runs, because the atomic coverage counters that `-race` needs can hide a data race. With `-deadcode -fix`, the tests run again only when the fix removed a function or `-modernize -fix` also ran.
+
+Each step writes a start line and an end line with its duration to stderr. Stdout and the `-output` report stay clean. The JSON report records each check's `duration_ms`.
+
+Use `-test=false` to skip the test check, for example when you only need the AST findings:
+```sh
+diago -target ./... -test=false -format json -output ast.json
+```
+
+Pass test flags through `GOFLAGS`. Every go command that the audit starts reads it, and each command ignores the flags it does not know. Use the `-flag=value` form:
+```sh
+GOFLAGS=-short diago -target ./...          # skip tests that check testing.Short
+GOFLAGS='-short -p=2' diago -target ./...   # also run at most 2 test binaries at a time
+```
+
 Formatting with `golines`:
 ```sh
 diago format -target . -max-len 120
@@ -164,6 +181,7 @@ Audit:
 -target          package path (default ./...)
 -output          report path (default .diago/audit.txt)
 -format          text or json (default text)
+-test            run go test on the target (default true)
 -race            run go test -race
 -coverage        collect coverage (default false)
 -deps            list dependencies (default false)

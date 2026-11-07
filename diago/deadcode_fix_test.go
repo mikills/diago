@@ -27,12 +27,15 @@ func live() int {
 			t.Fatal(err)
 		}
 
-		check := removeDeadCodeFindings([]ASTFinding{
+		check, removed := removeDeadCodeFindings([]ASTFinding{
 			{Rule: "dead-code", File: path, Line: 3, Symbol: "deadHelper", Message: "unexported function deadHelper appears unused within package"},
 			{Rule: "dead-code", File: path, Line: 8, Symbol: "documentedHook", Message: "unexported function documentedHook appears unused within package"},
 		})
 		if !check.Passed {
 			t.Fatal(check.Output)
+		}
+		if removed != 1 {
+			t.Fatalf("removed = %d, want 1", removed)
 		}
 		gotBytes, err := os.ReadFile(path)
 		if err != nil {

@@ -11,7 +11,8 @@ import (
 	"strings"
 )
 
-func removeDeadCodeFindings(findings []ASTFinding) AuditCheck {
+// removeDeadCodeFindings removes unexported dead functions and returns the check and the count of removed functions.
+func removeDeadCodeFindings(findings []ASTFinding) (AuditCheck, int) {
 	byFile := map[string][]ASTFinding{}
 	for _, finding := range findings {
 		if finding.Rule == "dead-code" && strings.HasPrefix(finding.Message, "unexported function ") {
@@ -19,20 +20,22 @@ func removeDeadCodeFindings(findings []ASTFinding) AuditCheck {
 		}
 	}
 	if len(byFile) == 0 {
-		return AuditCheck{Name: "deadcode-fix", Command: "remove unexported dead functions", Passed: true, Output: "no removable dead functions found"}
+		return AuditCheck{Name: "deadcode-fix", Command: "remove unexported dead functions", Passed: true, Output: "no removable dead functions found"}, 0
 	}
 
 	var out bytes.Buffer
+	removedCount := 0
 	for file, fileFindings := range byFile {
 		removed, err := removeDeadFuncsFromFile(file, fileFindings)
+		removedCount += len(removed)
 		if err != nil {
-			return AuditCheck{Name: "deadcode-fix", Command: "remove unexported dead functions", Passed: false, Output: err.Error()}
+			return AuditCheck{Name: "deadcode-fix", Command: "remove unexported dead functions", Passed: false, Output: err.Error()}, removedCount
 		}
 		for _, name := range removed {
 			fmt.Fprintf(&out, "removed %s from %s\n", name, file)
 		}
 	}
-	return AuditCheck{Name: "deadcode-fix", Command: "remove unexported dead functions", Passed: true, Output: out.String()}
+	return AuditCheck{Name: "deadcode-fix", Command: "remove unexported dead functions", Passed: true, Output: out.String()}, removedCount
 }
 
 type removal struct {
